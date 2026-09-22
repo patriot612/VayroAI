@@ -763,24 +763,7 @@ export async function handleCommand(
 
   switch (cmd) {
     case '/start':
-      await ctx.tg.sendMessage(
-        ctx.chatId,
-        t(
-          ctx.lang,
-          'welcome',
-        ),
-        {
-          markup:
-            mainReplyKeyboard(
-              ctx.lang,
-            ),
-        },
-      );
-
-      await showMainMenu(
-        ctx,
-      );
-
+      await showMainMenu(ctx);
       return;
 
     case '/menu':
