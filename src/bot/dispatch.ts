@@ -202,13 +202,9 @@ export async function handleCommand(ctx: Ctx, rawText: string): Promise<void> {
     case '/models':
       await showModels(ctx);
       return;
-    case '/rename': {
-      const chat = await ensureCurrentChat(ctx);
-      await setMode(ctx.db, ctx.user.id, 'rename', chat.id);
-      await ctx.tg.sendMessage(ctx.chatId, t(ctx.lang, 'chat.rename_prompt'));
-      return;
-    }
     case '/images':
+      await showScreen(ctx.tg, ctx.chatId, S.soonScreen(ctx.lang));
+      return;
     case '/templates':
       await showScreen(ctx.tg, ctx.chatId, S.soonScreen(ctx.lang));
       return;
@@ -227,9 +223,17 @@ export async function handleCommand(ctx: Ctx, rawText: string): Promise<void> {
       return;
     }
     case '/voice':
+      await showScreen(ctx.tg, ctx.chatId, S.soonScreen(ctx.lang));
+      return;
     case '/speak':
       await showScreen(ctx.tg, ctx.chatId, S.soonScreen(ctx.lang));
       return;
+    case '/rename': {
+      const chat = await ensureCurrentChat(ctx);
+      await setMode(ctx.db, ctx.user.id, 'rename', chat.id);
+      await ctx.tg.sendMessage(ctx.chatId, t(ctx.lang, 'chat.rename_prompt'));
+      return;
+    }
     case '/account':
       await showAccount(ctx);
       return;
@@ -422,7 +426,40 @@ export async function handleCallback(ctx: Ctx, data: string, editId: number): Pr
 // ---------------------------------------------------------------- plain text
 
 export async function handleText(ctx: Ctx, text: string): Promise<void> {
+  // Handle persistent Telegram reply-keyboard buttons before treating the text as AI input.
+  // Without this, labels such as "👤 Аккаунт" and "🧰 Инструменты" are sent to the AI model.
+  if (text === t(ctx.lang, 'btn.chat')) {
+    await showChatOpen(ctx, false);
+    return;
+  }
+
+  if (text === t(ctx.lang, 'btn.images')) {
+    await showScreen(ctx.tg, ctx.chatId, S.soonScreen(ctx.lang));
+    return;
+  }
+
+  if (text === t(ctx.lang, 'btn.models')) {
+    await showModels(ctx);
+    return;
+  }
+
+  if (text === t(ctx.lang, 'btn.chats')) {
+    await showChats(ctx, false, 0);
+    return;
+  }
+
+  if (text === t(ctx.lang, 'btn.tools')) {
+    await showTools(ctx);
+    return;
+  }
+
+  if (text === t(ctx.lang, 'btn.account')) {
+    await showAccount(ctx);
+    return;
+  }
+
   const maxChars = ctx.settings.int('user_message_max_chars');
+
   if (text.length > maxChars) {
     await ctx.tg.sendMessage(ctx.chatId, t(ctx.lang, 'err.too_long', { n: String(maxChars) }));
     return;
@@ -430,50 +467,78 @@ export async function handleText(ctx: Ctx, text: string): Promise<void> {
 
   if (ctx.user.mode === 'rename') {
     const chatId = ctx.user.mode_arg;
+
     await setMode(ctx.db, ctx.user.id, 'chat');
+
     if (chatId) {
       const title = truncate(text.trim(), 60);
       await renameChat(ctx.db, ctx.user.id, chatId, title);
       await ctx.tg.sendMessage(ctx.chatId, t(ctx.lang, 'chat.renamed', { title }));
     }
+
     return;
   }
 
   if (ctx.user.mode === 'role') {
     const chatId = ctx.user.mode_arg;
+
     await setMode(ctx.db, ctx.user.id, 'chat');
+
     if (chatId) {
       await setChatRole(ctx.db, ctx.user.id, chatId, null, text.trim());
       await ctx.tg.sendMessage(ctx.chatId, t(ctx.lang, 'roles.saved'));
     }
+
     return;
   }
 
   if (ctx.user.mode === 'search') {
     const key = ctx.user.search_model_key;
     const model = key ? await getModel(ctx.db, key) : null;
+
     if (!model || !model.is_active || !modelIsConfigured(ctx.env, model)) {
       await ctx.tg.sendMessage(ctx.chatId, t(ctx.lang, 'search.none'));
       return;
     }
+
     const chat = await ensureCurrentChat(ctx);
-    const outcome = await answerAndSend(ctx, { chat, model, userText: text, search: true, statusKey: 'status.search', saveTitleFromText: true });
-    if (outcome.status !== 'ok') await sendOutcomeError(ctx, outcome);
+    const outcome = await answerAndSend(ctx, {
+      chat,
+      model,
+      userText: text,
+      search: true,
+      statusKey: 'status.search',
+      saveTitleFromText: true
+    });
+
+    if (outcome.status !== 'ok') {
+      await sendOutcomeError(ctx, outcome);
+    }
+
     return;
   }
 
   if (ctx.user.mode === 'docs' || ctx.user.mode === 'voice' || ctx.user.mode === 'image') {
-    // V2-V4 modes are not implemented yet; degrade gracefully to plain chat rather than losing the message.
     await setMode(ctx.db, ctx.user.id, 'chat');
   }
 
-  // default: normal chat
   const chat = await ensureCurrentChat(ctx);
   const model = await chatModel(ctx, chat);
+
   if (!model || !modelIsConfigured(ctx.env, model)) {
     await ctx.tg.sendMessage(ctx.chatId, t(ctx.lang, 'err.model_unavailable'));
     return;
   }
-  const outcome = await answerAndSend(ctx, { chat, model, userText: text, statusKey: 'status.think', saveTitleFromText: true });
-  if (outcome.status !== 'ok') await sendOutcomeError(ctx, outcome);
+
+  const outcome = await answerAndSend(ctx, {
+    chat,
+    model,
+    userText: text,
+    statusKey: 'status.think',
+    saveTitleFromText: true
+  });
+
+  if (outcome.status !== 'ok') {
+    await sendOutcomeError(ctx, outcome);
+  }
 }
