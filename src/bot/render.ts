@@ -1,18 +1,17 @@
 import { Telegram, TelegramError } from '../telegram/api';
 import type { Screen } from '../telegram/types';
 import { mdToTelegramHtml } from '../util/markdown';
-import { clearUiMessageId, getUiMessageId, setUiMessageId } from '../db/users';
+import {
+  clearUiMessageId,
+  getUiMessageId,
+  setUiMessageId,
+} from '../db/users';
 
 /**
  * Show a normal screen.
  *
- * This function keeps the existing behaviour:
- * - if editMessageId is provided, edit that exact message;
- * - otherwise send a new message.
- *
- * IMPORTANT:
- * This function is NOT used for AI answers, translations,
- * images, documents, audio or other generated results.
+ * This function is used for ordinary screen rendering when an exact
+ * Telegram message ID is supplied.
  */
 export async function showScreen(
   tg: Telegram,
@@ -40,21 +39,18 @@ export async function showScreen(
         : editMessageId;
     } catch (e) {
       if (
-        !(e instanceof TelegramError &&
-          (e.notModified || e.gone))
-      ) {
-        throw e;
-      }
-
-      if (
         e instanceof TelegramError &&
         e.notModified
       ) {
         return editMessageId;
       }
 
-      // The old message no longer exists.
-      // Fall through and create a fresh UI message.
+      if (
+        !(e instanceof TelegramError &&
+          e.gone)
+      ) {
+        throw e;
+      }
     }
   }
 
@@ -72,22 +68,14 @@ export async function showScreen(
 }
 
 /**
- * Show a navigation/UI screen for a user.
+ * Show the dedicated navigation/UI message.
  *
- * ONLY navigation screens should use this function.
+ * This message is completely separate from AI answers and other
+ * generated results.
  *
- * The stored ui_message_id belongs exclusively to the UI.
- * It must NEVER be used for:
- * - AI answers
- * - translations
- * - generated images
- * - documents
- * - audio
- * - voice
- * - other user-requested results
- *
- * If a UI message already exists, edit it.
- * If it no longer exists, create a new UI message and save its ID.
+ * If the stored message cannot be edited for ANY Telegram "message
+ * is no longer editable/found" error, the stored ID is cleared and
+ * a fresh UI message is created.
  */
 export async function showUiScreen(
   tg: Telegram,
@@ -98,10 +86,20 @@ export async function showUiScreen(
 ): Promise<number | undefined> {
   const html = mdToTelegramHtml(screen.text);
 
-  const existingMessageId = await getUiMessageId(
-    db,
-    userId,
-  );
+  let existingMessageId: number | null = null;
+
+  try {
+    existingMessageId = await getUiMessageId(
+      db,
+      userId,
+    );
+  } catch {
+    /*
+     * If the DB read fails, do not prevent the bot from responding.
+     * Simply create a fresh UI message.
+     */
+    existingMessageId = null;
+  }
 
   if (existingMessageId) {
     try {
@@ -129,6 +127,13 @@ export async function showUiScreen(
 
       return messageId;
     } catch (e) {
+      /*
+       * The UI message may have been deleted, may belong to an old
+       * message, or Telegram may simply refuse editing it.
+       *
+       * In all such cases we discard the stored reference and create
+       * a new UI message.
+       */
       if (
         e instanceof TelegramError &&
         e.notModified
@@ -145,7 +150,14 @@ export async function showUiScreen(
           userId,
         );
       } else {
-        throw e;
+        /*
+         * Do not let a stale UI-message reference break Account,
+         * Tools, Chat, Models, etc.
+         */
+        await clearUiMessageId(
+          db,
+          userId,
+        );
       }
     }
   }
@@ -160,25 +172,33 @@ export async function showUiScreen(
     },
   );
 
-  await setUiMessageId(
-    db,
-    userId,
-    message.message_id,
-  );
+  try {
+    await setUiMessageId(
+      db,
+      userId,
+      message.message_id,
+    );
+  } catch {
+    /*
+     * The UI message was already sent successfully.
+     * A DB failure must not make the bot look broken to the user.
+     */
+  }
 
   return message.message_id;
 }
 
 /**
- * Clear the navigation/UI message reference.
+ * Forget the stored navigation/UI message.
  *
- * This does NOT delete the Telegram message.
- * It only tells the application that there is currently
- * no reusable UI message.
+ * Does NOT delete anything from Telegram.
  */
 export async function resetUiMessage(
   db: D1Database,
   userId: number,
 ): Promise<void> {
-  await clearUiMessageId(db, userId);
+  await clearUiMessageId(
+    db,
+    userId,
+  );
 }
