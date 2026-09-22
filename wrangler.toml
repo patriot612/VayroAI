@@ -13,7 +13,7 @@ crons = ["0 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "tg-ai-assistant"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "28871a69-c526-4617-b797-4a7c92a0db60"
 migrations_dir = "migrations"
 
 # Optional free provider: Cloudflare Workers AI (10,000 free "neurons"/day on the Free plan, no API key).
