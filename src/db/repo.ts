@@ -1,6 +1,6 @@
 import type { Env } from '../env';
 import { all, first, nowIso, placeholders, uuid } from './db';
-import type { Chat, Model, Order, Plan, Role, User } from './types';
+import type { Chat, Model, Order, Plan, Role, User, Lang } from './types';
 
 export async function getUser(db: D1Database, userId: number): Promise<User | null> {
   return first<User>(db.prepare('SELECT * FROM users WHERE id = ?').bind(userId));
@@ -16,9 +16,8 @@ export async function upsertUser(
   }
 ): Promise<User> {
   const existing = await getUser(db, tgUser.id);
-  const lang: 'ru' | 'en' =
-    existing?.language ??
-    (tgUser.language_code?.toLowerCase().startsWith('ru') ? 'ru' : 'en');
+  const code = (tgUser.language_code ?? '').toLowerCase();
+  const lang: Lang = existing?.language ?? (code.startsWith('ru') ? 'ru' : code.startsWith('uz') ? 'uz' : 'en');
 
   const now = nowIso();
 
@@ -536,9 +535,7 @@ export async function createOrder(
 
   const now = nowIso();
 
-  const expires = new Date(
-    Date.now() + 24 * 3600 * 1000
-  ).toISOString();
+  const expires = new Date(Date.now() + 30 * 60 * 1000).toISOString();
 
   await db
     .prepare(
@@ -676,7 +673,7 @@ export async function getLiveMessages(
     out.push(row);
   }
 
-  return out.reverse();
+  return out;
 }
 
 export async function saveMessages(
@@ -802,7 +799,7 @@ export async function updateChatModel(
   await db.batch([
     db
       .prepare(
-        'UPDATE chats SET model_key=?, updated_at=? WHERE id=? AND user_id=?'
+        'UPDATE chats SET model_key=?, role_key=NULL, custom_role=NULL, updated_at=? WHERE id=? AND user_id=?'
       )
       .bind(
         modelKey,
@@ -847,34 +844,26 @@ export async function archiveChat(
   db: D1Database,
   chatId: string,
   userId: number
-): Promise<void> {
-  await db
-    .prepare(
-      'UPDATE chats SET is_archived=1, updated_at=? WHERE id=? AND user_id=?'
-    )
-    .bind(
-      nowIso(),
-      chatId,
-      userId
-    )
-    .run();
+): Promise<boolean> {
+  const count = await first<{count:number}>(db.prepare('SELECT COUNT(*) as count FROM chats WHERE user_id=? AND is_archived=1').bind(userId));
+  if(Number(count?.count ?? 0) >= 15) return false;
+  const retention = await getArchiveRetentionHours(db,userId);
+  const now = nowIso();
+  const expires = new Date(Date.now()+retention*3600000).toISOString();
+  await db.batch([
+    db.prepare('UPDATE chats SET is_archived=1, updated_at=? WHERE id=? AND user_id=?').bind(now,chatId,userId),
+    db.prepare('UPDATE messages SET expires_at=? WHERE chat_id=? AND user_id=? AND expires_at>?').bind(expires,chatId,userId,now)
+  ]);
+  return true;
 }
 
 export async function unarchiveChat(
-  db: D1Database,
-  chatId: string,
-  userId: number
-): Promise<void> {
-  await db
-    .prepare(
-      'UPDATE chats SET is_archived=0, updated_at=? WHERE id=? AND user_id=?'
-    )
-    .bind(
-      nowIso(),
-      chatId,
-      userId
-    )
-    .run();
+  db: D1Database, chatId: string, userId: number
+): Promise<boolean> {
+  const active = await first<{count:number}>(db.prepare('SELECT COUNT(*) as count FROM chats WHERE user_id=? AND is_archived=0').bind(userId));
+  if(Number(active?.count ?? 0) >= 15) return false;
+  await db.prepare('UPDATE chats SET is_archived=0, updated_at=? WHERE id=? AND user_id=?').bind(nowIso(),chatId,userId).run();
+  return true;
 }
 
 export async function deleteChat(
@@ -1937,3 +1926,104 @@ export async function adminModels(
     )
   );
 } 
+
+
+export async function findUserByRef(db:D1Database, ref:string):Promise<User|null>{
+  const normalized=ref.trim().replace(/^@/,'');
+  if(/^\d+$/.test(normalized)) return getUser(db,Number(normalized));
+  return first<User>(db.prepare('SELECT * FROM users WHERE lower(username)=lower(?)').bind(normalized));
+}
+
+export async function countChats(db:D1Database,userId:number,archived:boolean):Promise<number>{
+  const r=await first<{count:number}>(db.prepare('SELECT COUNT(*) as count FROM chats WHERE user_id=? AND is_archived=?').bind(userId,archived?1:0));
+  return Number(r?.count??0);
+}
+
+export async function getArchiveRetentionHours(db:D1Database,userId:number):Promise<number>{
+  const sub=await first<{plan_key:string}>(db.prepare('SELECT plan_key FROM subscriptions WHERE user_id=? AND expires_at>? ORDER BY expires_at DESC LIMIT 1').bind(userId,nowIso()));
+  if(!sub) return 24;
+  const plan=await getPlan(db,sub.plan_key);
+  return plan && plan.duration_days && plan.duration_days>=30 ? 48 : 24;
+}
+
+export async function getActiveSubscription(db:D1Database,userId:number):Promise<{plan:Plan|null;expires_at:string}|null>{
+  const row=await first<{plan_key:string;expires_at:string}>(db.prepare('SELECT plan_key,expires_at FROM subscriptions WHERE user_id=? AND expires_at>? ORDER BY expires_at DESC LIMIT 1').bind(userId,nowIso()));
+  if(!row) return null;
+  return {plan:await getPlan(db,row.plan_key),expires_at:row.expires_at};
+}
+
+export async function getContextUsage(db:D1Database,chatId:string,userId:number):Promise<{messages:number;chars:number}>{
+  const r=await first<{messages:number;chars:number}>(db.prepare('SELECT COUNT(*) as messages, COALESCE(SUM(LENGTH(content)),0) as chars FROM messages WHERE chat_id=? AND user_id=? AND expires_at>?').bind(chatId,userId,nowIso()));
+  return {messages:Number(r?.messages??0),chars:Number(r?.chars??0)};
+}
+
+export async function grantPoints(db:D1Database,userId:number,amount:number,source='admin'):Promise<void>{
+  const now=nowIso();
+  await db.batch([
+    db.prepare('UPDATE balances SET purchased_points=purchased_points+?,updated_at=? WHERE user_id=?').bind(amount,now,userId),
+    db.prepare('INSERT INTO transactions(id,user_id,kind,free_amount,paid_amount,ref,created_at) VALUES(?,?,?,?,?,?,?)').bind(uuid(),userId,'admin',0,amount,source,now)
+  ]);
+}
+
+export async function takeBonusPoints(db:D1Database,userId:number,amount:number):Promise<boolean>{
+  const r=await db.prepare('UPDATE balances SET purchased_points=purchased_points-?,updated_at=? WHERE user_id=? AND purchased_points>=?').bind(amount,nowIso(),userId,amount).run();
+  return (r.meta?.changes??0)>0;
+}
+
+export async function grantSubscriptionPlan(db:D1Database,userId:number,planKey:string,source='admin'):Promise<{expiresAt:string;days:number;points:number}|null>{
+  const plan=await getPlan(db,planKey);
+  if(!plan || plan.kind!=='subscription' || !plan.duration_days) return null;
+  const now=new Date();
+  const existing=await first<{expires_at:string}>(db.prepare('SELECT expires_at FROM subscriptions WHERE user_id=? AND expires_at>? ORDER BY expires_at DESC LIMIT 1').bind(userId,now.toISOString()));
+  const start=existing?new Date(existing.expires_at):now;
+  const expires=new Date(start.getTime()+plan.duration_days*86400000).toISOString();
+  const daily=Number(plan.points)>0?Number(plan.points):Number((await getSetting(db,'free_points_subscriber'))??100);
+  const nowS=now.toISOString();
+  await db.batch([
+    db.prepare('INSERT INTO subscriptions(id,user_id,plan_key,starts_at,expires_at,source,order_id,created_at) VALUES(?,?,?,?,?,?,?,?)').bind(uuid(),userId,planKey,nowS,expires,source,null,nowS),
+    db.prepare('UPDATE balances SET free_points=?,free_reset_at=?,updated_at=? WHERE user_id=?').bind(daily,new Date(Date.now()+86400000).toISOString(),nowS,userId),
+    db.prepare('INSERT INTO transactions(id,user_id,kind,free_amount,paid_amount,ref,created_at) VALUES(?,?,?,?,?,?,?)').bind(uuid(),userId,'subscription_bonus',daily,0,planKey,nowS)
+  ]);
+  return {expiresAt:expires,days:plan.duration_days,points:daily};
+}
+
+export async function listImageModels(db:D1Database,env:Env):Promise<Model[]>{
+  const models=await all<Model>(db.prepare("SELECT * FROM models WHERE is_active=1 AND type='image' ORDER BY sort,name"));
+  return models.filter(m=>providerConfigured(m,env));
+}
+
+export function modelConfig(model:Model):Record<string,any>{try{return JSON.parse(model.config||'{}')}catch{return {}}}
+
+export function modelEmoji(model:Model):string{const cfg=modelConfig(model);if(typeof cfg.emoji==='string'&&cfg.emoji)return cfg.emoji;if(model.type==='image')return '🎨';if(model.type==='search')return '🔎';return model.tier==='advanced'?'🧠':'💬'}
+
+export function isPremiumImageModel(model:Model):boolean{return model.type==='image' && model.is_free===0}
+
+export async function imageInputCost(db:D1Database):Promise<number>{return Number((await getSetting(db,'image_input_cost'))??3)}
+export async function templateCost(db:D1Database,id:string,defaultCost=5):Promise<number>{return Number((await getSetting(db,`image_template_price_${id}`))??defaultCost)}
+
+export async function cleanupExpiredArchivedChats(db:D1Database):Promise<void>{
+  const chats=await all<{id:string;user_id:number;updated_at:string}>(db.prepare("SELECT id,user_id,updated_at FROM chats WHERE is_archived=1 ORDER BY updated_at ASC LIMIT 100"));
+  const now=Date.now();
+  for(const c of chats){const keep=await getArchiveRetentionHours(db,c.user_id);if(new Date(c.updated_at).getTime()+keep*3600000<=now) await deleteChat(db,c.id,c.user_id)}
+}
+
+export async function switchToArchivedChat(db:D1Database,chatId:string,userId:number):Promise<boolean>{
+  const target=await getChat(db,chatId,userId);if(!target||!target.is_archived)return false;
+  const current=await first<{id:string}>(db.prepare('SELECT current_chat_id as id FROM users WHERE id=?').bind(userId));
+  const now=nowIso();
+  if(current?.id && current.id!==chatId){
+    await db.batch([
+      db.prepare('UPDATE chats SET is_archived=1,updated_at=? WHERE id=? AND user_id=?').bind(now,current.id,userId),
+      db.prepare('UPDATE chats SET is_archived=0,updated_at=? WHERE id=? AND user_id=?').bind(now,chatId,userId),
+      db.prepare('UPDATE messages SET expires_at=? WHERE chat_id=? AND user_id=? AND expires_at>?').bind(new Date(Date.now()+await getArchiveRetentionHours(db,userId)*3600000).toISOString(),current.id,userId,now),
+      db.prepare('UPDATE users SET current_chat_id=?,last_model_key=? WHERE id=?').bind(chatId,target.model_key,userId)
+    ]);
+  } else {
+    const active=await first<{count:number}>(db.prepare('SELECT COUNT(*) as count FROM chats WHERE user_id=? AND is_archived=0').bind(userId));
+    if(Number(active?.count??0)>=15)return false;
+    await db.batch([db.prepare('UPDATE chats SET is_archived=0,updated_at=? WHERE id=? AND user_id=?').bind(now,chatId,userId),db.prepare('UPDATE users SET current_chat_id=?,last_model_key=? WHERE id=?').bind(chatId,target.model_key,userId)]);
+  }
+  return true;
+}
+
+export async function currentChatForUser(db:D1Database,userId:number):Promise<Chat|null>{const u=await getUser(db,userId);return u?.current_chat_id?getChat(db,u.current_chat_id,userId):null}
