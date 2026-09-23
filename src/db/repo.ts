@@ -1897,5 +1897,40 @@ export async function getUserStats(
     totalResponses: Number(
       totalResponses?.count ?? 0
     )
-  };
+ export async function incrementLastSeen(
+  db: D1Database,
+  userId: number
+): Promise<void> {
+  await db
+    .prepare(
+      'UPDATE users SET last_seen_at=? WHERE id=?'
+    )
+    .bind(
+      nowIso(),
+      userId
+    )
+    .run();
 }
+
+export async function modelByKey(
+  db: D1Database,
+  key: string
+): Promise<Model | null> {
+  return first<Model>(
+    db
+      .prepare(
+        'SELECT * FROM models WHERE model_key=?'
+      )
+      .bind(key)
+  );
+}
+
+export async function adminModels(
+  db: D1Database
+): Promise<Model[]> {
+  return all<Model>(
+    db.prepare(
+      'SELECT * FROM models ORDER BY family,sort,name'
+    )
+  );
+} 
