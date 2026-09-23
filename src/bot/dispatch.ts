@@ -1,5 +1,5 @@
 import type { Ctx } from './context';
-import { showUiScreen } from './render';
+import { showScreen, showUiScreen } from './render';
 import * as S from './screens';
 import { mainReplyKeyboard } from './keyboards';
 import {
@@ -32,6 +32,30 @@ async function usableModels(ctx: Ctx, type: string) {
   return list.filter((m) => modelIsConfigured(ctx.env, m));
 }
 
+async function showNavigationScreen(
+  ctx: Ctx,
+  screen: Parameters<typeof showScreen>[2],
+  editId?: number,
+): Promise<void> {
+  if (typeof editId === 'number') {
+    await showScreen(
+      ctx.tg,
+      ctx.chatId,
+      screen,
+      editId,
+    );
+    return;
+  }
+
+  await showUiScreen(
+    ctx.tg,
+    ctx.db,
+    ctx.user.id,
+    ctx.chatId,
+    screen,
+  );
+}
+
 async function showMainMenu(ctx: Ctx, editId?: number): Promise<void> {
   // DIAGNOSTIC (temporary): trace exactly where /start's second message can stop.
   logEvent('show_main_menu_start', { userId: ctx.user.id, chatId: ctx.chatId });
@@ -39,13 +63,7 @@ async function showMainMenu(ctx: Ctx, editId?: number): Promise<void> {
     const chat = await ensureCurrentChat(ctx);
     const model = await chatModel(ctx, chat);
     const n = await messageCount(ctx.db, ctx.user.id, chat.id, ctx.now);
-    await showUiScreen(
-      ctx.tg,
-      ctx.db,
-      ctx.user.id,
-      ctx.chatId,
-      S.mainMenuScreen(ctx.lang, chat, model, n),
-    );
+    await showNavigationScreen(ctx, S.mainMenuScreen(ctx.lang, chat, model, n), editId);
     logEvent('show_main_menu_ok', { userId: ctx.user.id });
   } catch (e) {
     logError('show_main_menu_failed', e, { userId: ctx.user.id });
@@ -58,13 +76,7 @@ async function showChatOpen(ctx: Ctx, isNew: boolean, editId?: number): Promise<
   const chat = await ensureCurrentChat(ctx);
   const model = await chatModel(ctx, chat);
 
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    S.chatOpenScreen(ctx.lang, chat, model, isNew),
-  );
+  await showNavigationScreen(ctx, S.chatOpenScreen(ctx.lang, chat, model, isNew), editId);
 }
 
 async function showModels(ctx: Ctx, editId?: number): Promise<void> {
@@ -81,13 +93,7 @@ async function showModels(ctx: Ctx, editId?: number): Promise<void> {
     );
   }
 
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    S.modelsScreen(ctx.lang, chat, current, byFamily),
-  );
+  await showNavigationScreen(ctx, S.modelsScreen(ctx.lang, chat, current, byFamily), editId);
 }
 
 async function showChats(
@@ -117,20 +123,14 @@ async function showChats(
     ctx.user.current_chat_id,
   );
 
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    S.chatListScreen(
+  await showNavigationScreen(ctx, S.chatListScreen(
       ctx.lang,
       current,
       shown,
       archived,
       hasMore,
       page,
-    ),
-  );
+    ), editId);
 
   void total;
 }
@@ -178,33 +178,21 @@ async function showChatDetail(
     ctx.now,
   );
 
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    S.chatDetailScreen(
+  await showNavigationScreen(ctx, S.chatDetailScreen(
       ctx.lang,
       chat,
       model,
       msgs,
       total === 0 && total < 999999 && false,
       chat.is_archived === 1,
-    ),
-  );
+    ), editId);
 }
 
 async function showTools(
   ctx: Ctx,
   editId?: number,
 ): Promise<void> {
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    S.toolsScreen(ctx.lang),
-  );
+  await showNavigationScreen(ctx, S.toolsScreen(ctx.lang), editId);
 }
 
 async function showSearch(
@@ -245,17 +233,11 @@ async function showSearch(
     'search',
   );
 
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    S.searchScreen(
+  await showNavigationScreen(ctx, S.searchScreen(
       ctx.lang,
       models,
       current,
-    ),
-  );
+    ), editId);
 }
 
 async function showRoles(
@@ -271,17 +253,11 @@ async function showRoles(
     chatId,
   );
 
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    S.rolesScreen(
+  await showNavigationScreen(ctx, S.rolesScreen(
       ctx.lang,
       roles,
       chat?.role_key ?? null,
-    ),
-  );
+    ), editId);
 }
 
 async function showAccount(
@@ -298,17 +274,11 @@ async function showAccount(
       ctx.now,
     );
 
-    await showUiScreen(
-      ctx.tg,
-      ctx.db,
-      ctx.user.id,
-      ctx.chatId,
-      S.accountScreen(
+    await showNavigationScreen(ctx, S.accountScreen(
         ctx.lang,
         ctx.user,
         bal,
-      ),
-    );
+      ), editId);
     logEvent('show_account_ok', { userId: ctx.user.id });
   } catch (e) {
     logError('show_account_failed', e, { userId: ctx.user.id });
@@ -320,25 +290,14 @@ async function showLanguage(
   ctx: Ctx,
   editId?: number,
 ): Promise<void> {
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    S.languageScreen(ctx.lang),
-  );
+  await showNavigationScreen(ctx, S.languageScreen(ctx.lang), editId);
 }
 
 async function showHelp(
   ctx: Ctx,
   editId?: number,
 ): Promise<void> {
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    S.helpScreen(
+  await showNavigationScreen(ctx, S.helpScreen(
       ctx.lang,
       String(
         Math.max(
@@ -355,8 +314,7 @@ async function showHelp(
           'message_ttl_hours',
         ),
       ),
-    ),
-  );
+    ), editId);
 }
 
 async function showPlans(
@@ -388,12 +346,7 @@ async function showPlans(
     (m) => m.tier === 'advanced',
   );
 
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    S.plansScreen(
+  await showNavigationScreen(ctx, S.plansScreen(
       ctx.lang,
       String(
         ctx.settings.int(
@@ -403,8 +356,7 @@ async function showPlans(
       dailyModel,
       advModels[0] ?? null,
       featured,
-    ),
-  );
+    ), editId);
 }
 
 async function showPlansMore(
@@ -456,12 +408,7 @@ async function showPlansMore(
     },
   ]);
 
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    {
+  await showNavigationScreen(ctx, {
       text: t(
         ctx.lang,
         'plans.more',
@@ -469,8 +416,7 @@ async function showPlansMore(
       kb: {
         inline_keyboard: kbRows,
       },
-    },
-  );
+    }, editId);
 }
 
 async function showPlanConfirm(
@@ -550,16 +496,10 @@ async function showPlanConfirm(
     ],
   };
 
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    {
+  await showNavigationScreen(ctx, {
       text,
       kb,
-    },
-  );
+    }, editId);
 }
 
 async function showPoints(
@@ -597,12 +537,7 @@ async function showPoints(
     },
   ]);
 
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    {
+  await showNavigationScreen(ctx, {
       text: t(
         ctx.lang,
         'plans.points',
@@ -610,8 +545,7 @@ async function showPoints(
       kb: {
         inline_keyboard: kbRows,
       },
-    },
-  );
+    }, editId);
 }
 
 async function buyPlan(
@@ -665,6 +599,7 @@ async function buyPlan(
   await showOrder(
     ctx,
     order.id,
+    editId,
   );
 }
 
@@ -680,12 +615,7 @@ async function showOrders(
     ),
   );
 
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    S.ordersListScreen(
+  await showNavigationScreen(ctx, S.ordersListScreen(
       ctx.lang,
       orders,
       String(
@@ -693,8 +623,7 @@ async function showOrders(
           'orders_page_size',
         ),
       ),
-    ),
-  );
+    ), editId);
 }
 
 async function showOrder(
@@ -712,27 +641,23 @@ async function showOrder(
     return;
   }
 
-  await showUiScreen(
-    ctx.tg,
-    ctx.db,
-    ctx.user.id,
-    ctx.chatId,
-    S.orderCardScreen(
+  await showNavigationScreen(ctx, S.orderCardScreen(
       ctx.lang,
       order,
-    ),
-  );
+    ), editId);
 }
 
 async function checkOrder(
   ctx: Ctx,
   orderId: string,
+  editId?: number,
 ): Promise<void> {
   // No payment provider is wired in V1.
   // This only re-renders the current order status.
   await showOrder(
     ctx,
     orderId,
+    editId,
   );
 }
 
@@ -1010,6 +935,7 @@ export async function handleCommand(
 
 async function chatNew(
   ctx: Ctx,
+  editId?: number,
 ): Promise<void> {
   const current =
     await getChat(
@@ -1054,6 +980,7 @@ async function chatNew(
   await showChatOpen(
     ctx,
     true,
+    editId,
   );
 }
 
@@ -1115,7 +1042,7 @@ export async function handleCallback(
     switch (action) {
       case 'menu':
         return void (
-          await showMainMenu(ctx)
+          await showMainMenu(ctx, editId)
         );
 
       case 'chat':
@@ -1123,12 +1050,13 @@ export async function handleCallback(
           await showChatOpen(
             ctx,
             false,
+            editId,
           )
         );
 
       case 'models':
         return void (
-          await showModels(ctx)
+          await showModels(ctx, editId)
         );
 
       case 'chats':
@@ -1137,6 +1065,7 @@ export async function handleCallback(
             ctx,
             false,
             0,
+            editId,
           )
         );
 
@@ -1144,25 +1073,21 @@ export async function handleCallback(
       case 'docs':
       case 'voice':
         return void (
-          await showUiScreen(
-            ctx.tg,
-            ctx.db,
-            ctx.user.id,
-            ctx.chatId,
-            S.soonScreen(
-              ctx.lang,
-            ),
+          await showNavigationScreen(
+            ctx,
+            S.soonScreen(ctx.lang),
+            editId,
           )
         );
 
       case 'tools':
         return void (
-          await showTools(ctx)
+          await showTools(ctx, editId)
         );
 
       case 'search':
         return void (
-          await showSearch(ctx)
+          await showSearch(ctx, editId)
         );
 
       case 'roles': {
@@ -1175,38 +1100,39 @@ export async function handleCallback(
           await showRoles(
             ctx,
             chat.id,
+            editId,
           )
         );
       }
 
       case 'account':
         return void (
-          await showAccount(ctx)
+          await showAccount(ctx, editId)
         );
 
       case 'language':
         return void (
-          await showLanguage(ctx)
+          await showLanguage(ctx, editId)
         );
 
       case 'help':
         return void (
-          await showHelp(ctx)
+          await showHelp(ctx, editId)
         );
 
       case 'plans':
         return void (
-          await showPlans(ctx)
+          await showPlans(ctx, editId)
         );
 
       case 'points':
         return void (
-          await showPoints(ctx)
+          await showPoints(ctx, editId)
         );
 
       case 'orders':
         return void (
-          await showOrders(ctx)
+          await showOrders(ctx, editId)
         );
     }
 
@@ -1220,7 +1146,7 @@ export async function handleCallback(
       action === 'new'
     ) {
       return void (
-        await chatNew(ctx)
+        await chatNew(ctx, editId)
       );
     }
 
@@ -1240,6 +1166,7 @@ export async function handleCallback(
         await showChatOpen(
           ctx,
           false,
+          editId,
         )
       );
     }
@@ -1251,6 +1178,7 @@ export async function handleCallback(
         await showChatDetail(
           ctx,
           id,
+          editId,
         )
       );
     }
@@ -1303,6 +1231,7 @@ export async function handleCallback(
           ctx,
           false,
           0,
+          editId,
         )
       );
     }
@@ -1322,15 +1251,10 @@ export async function handleCallback(
       }
 
       return void (
-        await showUiScreen(
-          ctx.tg,
-          ctx.db,
-          ctx.user.id,
-          ctx.chatId,
-          S.deleteConfirmScreen(
-            ctx.lang,
-            chat,
-          ),
+        await showNavigationScreen(
+          ctx,
+          S.deleteConfirmScreen(ctx.lang, chat),
+          editId,
         )
       );
     }
@@ -1364,6 +1288,7 @@ export async function handleCallback(
           ctx,
           false,
           0,
+          editId,
         )
       );
     }
@@ -1418,7 +1343,7 @@ export async function handleCallback(
       key,
     );
 
-    await showModels(ctx);
+    await showModels(ctx, editId);
 
     return {
       toast: t(
@@ -1441,7 +1366,7 @@ export async function handleCallback(
       key,
     );
 
-    await showSearch(ctx);
+    await showSearch(ctx, editId);
 
     return;
   }
@@ -1497,6 +1422,7 @@ export async function handleCallback(
       await showRoles(
         ctx,
         chat.id,
+        editId,
       );
 
       return {
@@ -1525,7 +1451,7 @@ export async function handleCallback(
 
     ctx.lang = lang;
 
-    await showLanguage(ctx);
+    await showLanguage(ctx, editId);
 
     await ctx.tg.safe(
       ctx.tg.sendMessage(
@@ -1564,6 +1490,7 @@ export async function handleCallback(
         ctx,
         archived,
         page,
+        editId,
       )
     );
   }
@@ -1573,7 +1500,7 @@ export async function handleCallback(
     action === 'more'
   ) {
     return void (
-      await showPlansMore(ctx)
+      await showPlansMore(ctx, editId)
     );
   }
 
@@ -1590,6 +1517,7 @@ export async function handleCallback(
         await showPlanConfirm(
           ctx,
           key,
+          editId,
         )
       );
     }
@@ -1601,6 +1529,7 @@ export async function handleCallback(
         await buyPlan(
           ctx,
           key,
+          editId,
         )
       );
     }
@@ -1619,6 +1548,7 @@ export async function handleCallback(
         await showOrder(
           ctx,
           id,
+          editId,
         )
       );
     }
@@ -1630,6 +1560,7 @@ export async function handleCallback(
         await checkOrder(
           ctx,
           id,
+          editId,
         )
       );
     }
