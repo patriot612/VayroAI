@@ -1897,7 +1897,10 @@ export async function getUserStats(
     totalResponses: Number(
       totalResponses?.count ?? 0
     )
- export async function incrementLastSeen(
+  };
+}
+
+export async function incrementLastSeen(
   db: D1Database,
   userId: number
 ): Promise<void> {
