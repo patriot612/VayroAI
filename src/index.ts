@@ -1183,6 +1183,7 @@ async function handleCallback(
         env.DB,
         env,
         user,
+        chat,
         decodeURIComponent(
           args.join(':')
         ),
