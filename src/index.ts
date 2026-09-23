@@ -265,20 +265,30 @@ async function handleUpdate(
       user.language
     );
 
-    if (replyAction) {
-      await handleReplyMenuAction(
-        replyAction,
-        api,
-        user,
-        env
+if (replyAction) {
+  try {
+    await handleReplyMenuAction(
+      replyAction,
+      api,
+      user,
+      env
+    );
+  } finally {
+    try {
+      await api.deleteMessage(
+        user.id,
+        message.message_id
       );
-      return;
-    }
+    } catch {}
   }
 
-  if (
-    text?.startsWith('/')
-  ) {
+  return;
+}
+
+if (
+  text?.startsWith('/')
+) {
+  try {
     await handleCommand(
       text,
       message,
@@ -286,9 +296,17 @@ async function handleUpdate(
       env,
       ctx
     );
-
-    return;
+  } finally {
+    try {
+      await api.deleteMessage(
+        user.id,
+        message.message_id
+      );
+    } catch {}
   }
+
+  return;
+}
 
   if (message.text) {
     await handleText(
