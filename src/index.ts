@@ -3086,7 +3086,117 @@ async function cmdSetModel(
   );
 }
 
-async function cmdAddModel(api:TelegramApi,user:any,env:Env,body:string){if(!await requireAdmin(api,user,env))return;const p=body.split('|').map(x=>x.trim());if(p.length<7){await safeSend(api,user.id,t(user.language,'invalid_args'));return}const[key,family,provider,model_id,name,tier,cost,type='chat',emoji='',isFree='0',config='{}']=p;if(!key||!family||!provider||!model_id||!name||!['daily','advanced'].includes(tier)||!/^[0-9]+$/.test(cost)||!['chat','search','image'].includes(type)||!/^[01]$/.test(isFree)){await safeSend(api,user.id,t(user.language,'invalid_args'));return}let cfg:any={};try{cfg=JSON.parse(config)}catch{await safeSend(api,user.id,t(user.language,'invalid_args'));return}if(emoji)cfg.emoji=emoji;cfg.premium=isFree==='0';await env.DB.prepare(`INSERT INTO models(model_key,name,family,provider,model_id,type,tier,cost,is_active,is_free,supports_text,config,sort,created_at) VALUES(?,?,?,?,?,?,?,?,1,?,?,?,?,100,?)`).bind(key,name,family,provider,model_id,type,tier,Number(cost),Number(isFree),type==='chat'||type==='search'?1:0,JSON.stringify(cfg),nowIso()).run();await adminAudit(env.DB,user.id,`model:add:${key}`);await safeSend(api,user.id,t(user.language,'done'))}
+ async function cmdAddModel(api:TelegramApi,user:any,env:Env,body:string){
+  if(!await requireAdmin(api,user,env))return;
+
+  const p=body.split('|').map(x=>x.trim());
+
+  if(p.length<7){
+    await safeSend(api,user.id,t(user.language,'invalid_args'));
+    return;
+  }
+
+  const [
+    key,
+    family,
+    provider,
+    model_id,
+    name,
+    tier,
+    cost,
+    type='chat',
+    emoji='',
+    isFree='0',
+    config='{}'
+  ]=p;
+
+  if(
+    !key ||
+    !family ||
+    !provider ||
+    !model_id ||
+    !name ||
+    !['daily','advanced'].includes(tier) ||
+    !/^[0-9]+$/.test(cost) ||
+    !['chat','search','image'].includes(type) ||
+    !/^[01]$/.test(isFree)
+  ){
+    await safeSend(api,user.id,t(user.language,'invalid_args'));
+    return;
+  }
+
+  let cfg:any={};
+
+  try{
+    cfg=JSON.parse(config);
+  }catch{
+    await safeSend(api,user.id,t(user.language,'invalid_args'));
+    return;
+  }
+
+  if(emoji)cfg.emoji=emoji;
+
+  cfg.premium=isFree==='0';
+
+  try{
+    await env.DB.prepare(`
+      INSERT INTO models(
+        model_key,
+        name,
+        family,
+        provider,
+        model_id,
+        type,
+        tier,
+        cost,
+        is_active,
+        is_free,
+        supports_text,
+        config,
+        sort,
+        created_at
+      )
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      key,
+      name,
+      family,
+      provider,
+      model_id,
+      type,
+      tier,
+      Number(cost),
+      1,
+      Number(isFree),
+      type==='chat'||type==='search'?1:0,
+      JSON.stringify(cfg),
+      100,
+      nowIso()
+    ).run();
+
+    await adminAudit(
+      env.DB,
+      user.id,
+      `model:add:${key}`
+    );
+
+    await safeSend(
+      api,
+      user.id,
+      t(user.language,'done')
+    );
+
+  }catch(err){
+
+    console.error('cmdAddModel error:',err);
+
+    await safeSend(
+      api,
+      user.id,
+      `❌ Ошибка добавления модели: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
 
 async function cmdDelModel(
   api: TelegramApi,
