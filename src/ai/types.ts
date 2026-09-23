@@ -1,35 +1,8 @@
-export interface ChatTurn {
-  role: 'user' | 'assistant';
-  content: string;
-}
+import type { Env } from '../env';
+import type { Model } from '../db/types';
 
-export interface CompletionRequest {
-  system?: string;
-  history: ChatTurn[];
-  input: string;
-  maxOutputTokens?: number;
-  search?: boolean;
-}
+export type ChatTurn={role:'system'|'user'|'assistant';content:string};
+export type Source={title:string;url:string};
+export type AiResult={text:string;sources?:Source[];providerRequestId?:string;};
 
-export interface Citation {
-  title: string;
-  url: string;
-}
-
-export interface CompletionResult {
-  text: string;
-  citations?: Citation[];
-}
-
-export class ProviderError extends Error {
-  constructor(
-    message: string,
-    public kind: 'unavailable' | 'blocked' | 'rate_limited' | 'timeout' | 'unknown' = 'unknown',
-  ) {
-    super(message);
-  }
-}
-
-export interface Provider {
-  complete(modelId: string, req: CompletionRequest, config: Record<string, unknown>): Promise<CompletionResult>;
-}
+export interface ProviderAdapter{generate(model:Model,messages:ChatTurn[],env:Env):Promise<AiResult>;}
