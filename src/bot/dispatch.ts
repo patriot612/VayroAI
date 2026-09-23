@@ -32,6 +32,15 @@ async function usableModels(ctx: Ctx, type: string) {
   return list.filter((m) => modelIsConfigured(ctx.env, m));
 }
 
+/*
+ * IMPORTANT:
+ * Inline keyboard callbacks must edit the exact Telegram message
+ * from which the button was pressed.
+ *
+ * When editId is provided, use showScreen() directly.
+ * When editId is not provided, use the persistent UI message stored
+ * for the user through showUiScreen().
+ */
 async function showNavigationScreen(
   ctx: Ctx,
   screen: Parameters<typeof showScreen>[2],
@@ -56,44 +65,97 @@ async function showNavigationScreen(
   );
 }
 
-async function showMainMenu(ctx: Ctx, editId?: number): Promise<void> {
-  // DIAGNOSTIC (temporary): trace exactly where /start's second message can stop.
-  logEvent('show_main_menu_start', { userId: ctx.user.id, chatId: ctx.chatId });
-  try {
-    const chat = await ensureCurrentChat(ctx);
-    const model = await chatModel(ctx, chat);
-    const n = await messageCount(ctx.db, ctx.user.id, chat.id, ctx.now);
-    await showNavigationScreen(ctx, S.mainMenuScreen(ctx.lang, chat, model, n), editId);
-    logEvent('show_main_menu_ok', { userId: ctx.user.id });
-  } catch (e) {
-    logError('show_main_menu_failed', e, { userId: ctx.user.id });
-    throw e;
-  }
+async function showMainMenu(
+  ctx: Ctx,
+  editId?: number,
+): Promise<void> {
+  const chat = await ensureCurrentChat(ctx);
+  const model = await chatModel(ctx, chat);
+  const n = await messageCount(
+    ctx.db,
+    ctx.user.id,
+    chat.id,
+    ctx.now,
+  );
+
+  await showNavigationScreen(
+    ctx,
+    S.mainMenuScreen(
+      ctx.lang,
+      chat,
+      model,
+      n,
+    ),
+    editId,
+  );
 }
 
-async function showChatOpen(ctx: Ctx, isNew: boolean, editId?: number): Promise<void> {
-  await setMode(ctx.db, ctx.user.id, 'chat');
+async function showChatOpen(
+  ctx: Ctx,
+  isNew: boolean,
+  editId?: number,
+): Promise<void> {
+  await setMode(
+    ctx.db,
+    ctx.user.id,
+    'chat',
+  );
+
   const chat = await ensureCurrentChat(ctx);
   const model = await chatModel(ctx, chat);
 
-  await showNavigationScreen(ctx, S.chatOpenScreen(ctx.lang, chat, model, isNew), editId);
+  await showNavigationScreen(
+    ctx,
+    S.chatOpenScreen(
+      ctx.lang,
+      chat,
+      model,
+      isNew,
+    ),
+    editId,
+  );
 }
 
-async function showModels(ctx: Ctx, editId?: number): Promise<void> {
+async function showModels(
+  ctx: Ctx,
+  editId?: number,
+): Promise<void> {
   const chat = await ensureCurrentChat(ctx);
-  const models = await usableModels(ctx, 'chat');
-  const current = await getModel(ctx.db, chat.model_key);
+  const models = await usableModels(
+    ctx,
+    'chat',
+  );
 
-  const byFamily = new Map<string, typeof models>();
+  const current = await getModel(
+    ctx.db,
+    chat.model_key,
+  );
+
+  const byFamily = new Map<
+    string,
+    typeof models
+  >();
 
   for (const m of models) {
     byFamily.set(
       m.family,
-      [...(byFamily.get(m.family) ?? []), m],
+      [
+        ...(byFamily.get(m.family) ?? []),
+        m,
+      ],
     );
   }
 
-  await showNavigationScreen(ctx, S.modelsScreen(ctx.lang, chat, current, byFamily), editId);
+  await showNavigationScreen(
+    ctx,
+    S.modelsScreen(
+      ctx.lang,
+      chat,
+      current,
+      byFamily,
+    ),
+    editId,
+  );
 }
 
 async function showChats(
@@ -104,33 +166,47 @@ async function showChats(
 ): Promise<void> {
   const pageSize = 8;
 
-  const [list, total] = await Promise.all([
-    listChats(
+  const [list, total] =
+    await Promise.all([
+      listChats(
+        ctx.db,
+        ctx.user.id,
+        archived,
+        pageSize + 1,
+        page * pageSize,
+      ),
+      countChats(
+        ctx.db,
+        ctx.user.id,
+        archived,
+      ),
+    ]);
+
+  const hasMore =
+    list.length > pageSize;
+
+  const shown =
+    list.slice(0, pageSize);
+
+  const current =
+    await getChat(
       ctx.db,
       ctx.user.id,
-      archived,
-      pageSize + 1,
-      page * pageSize,
-    ),
-    countChats(ctx.db, ctx.user.id, archived),
-  ]);
+      ctx.user.current_chat_id,
+    );
 
-  const hasMore = list.length > pageSize;
-  const shown = list.slice(0, pageSize);
-  const current = await getChat(
-    ctx.db,
-    ctx.user.id,
-    ctx.user.current_chat_id,
-  );
-
-  await showNavigationScreen(ctx, S.chatListScreen(
+  await showNavigationScreen(
+    ctx,
+    S.chatListScreen(
       ctx.lang,
       current,
       shown,
       archived,
       hasMore,
       page,
-    ), editId);
+    ),
+    editId,
+  );
 
   void total;
 }
@@ -147,74 +223,93 @@ async function showChatDetail(
   );
 
   if (!chat) {
-    return void (
-      await ctx.tg.safe(
-        ctx.tg.sendMessage(
-          ctx.chatId,
-          t(ctx.lang, 'chat.not_found'),
+    await ctx.tg.safe(
+      ctx.tg.sendMessage(
+        ctx.chatId,
+        t(
+          ctx.lang,
+          'chat.not_found',
         ),
-        'nf',
-      )
+      ),
+      'nf',
     );
+    return;
   }
 
-  const model = await getModel(
-    ctx.db,
-    chat.model_key,
-  );
+  const model =
+    await getModel(
+      ctx.db,
+      chat.model_key,
+    );
 
-  const msgs = await recentMessages(
-    ctx.db,
-    ctx.user.id,
-    chatId,
-    ctx.now,
-    20,
-  );
+  const msgs =
+    await recentMessages(
+      ctx.db,
+      ctx.user.id,
+      chatId,
+      ctx.now,
+      20,
+    );
 
-  const total = await messageCount(
-    ctx.db,
-    ctx.user.id,
-    chatId,
-    ctx.now,
-  );
+  const total =
+    await messageCount(
+      ctx.db,
+      ctx.user.id,
+      chatId,
+      ctx.now,
+    );
 
-  await showNavigationScreen(ctx, S.chatDetailScreen(
+  await showNavigationScreen(
+    ctx,
+    S.chatDetailScreen(
       ctx.lang,
       chat,
       model,
       msgs,
-      total === 0 && total < 999999 && false,
+      total === 0 &&
+        total < 999999 &&
+        false,
       chat.is_archived === 1,
-    ), editId);
+    ),
+    editId,
+  );
 }
 
 async function showTools(
   ctx: Ctx,
   editId?: number,
 ): Promise<void> {
-  await showNavigationScreen(ctx, S.toolsScreen(ctx.lang), editId);
+  await showNavigationScreen(
+    ctx,
+    S.toolsScreen(ctx.lang),
+    editId,
+  );
 }
 
 async function showSearch(
   ctx: Ctx,
   editId?: number,
 ): Promise<void> {
-  const models = await usableModels(
-    ctx,
-    'search',
-  );
+  const models =
+    await usableModels(
+      ctx,
+      'search',
+    );
 
   const key =
     ctx.user.search_model_key &&
     models.some(
-      (m) => m.key === ctx.user.search_model_key,
+      (m) =>
+        m.key ===
+        ctx.user.search_model_key,
     )
       ? ctx.user.search_model_key
       : models[0]?.key;
 
   if (
     key &&
-    key !== ctx.user.search_model_key
+    key !==
+      ctx.user.search_model_key
   ) {
     await setSearchModel(
       ctx.db,
@@ -224,7 +319,10 @@ async function showSearch(
   }
 
   const current = key
-    ? await getModel(ctx.db, key)
+    ? await getModel(
+        ctx.db,
+        key,
+      )
     : null;
 
   await setMode(
@@ -233,11 +331,15 @@ async function showSearch(
     'search',
   );
 
-  await showNavigationScreen(ctx, S.searchScreen(
+  await showNavigationScreen(
+    ctx,
+    S.searchScreen(
       ctx.lang,
       models,
       current,
-    ), editId);
+    ),
+    editId,
+  );
 }
 
 async function showRoles(
@@ -245,59 +347,70 @@ async function showRoles(
   chatId: string,
   editId?: number,
 ): Promise<void> {
-  const roles = await listRoles(ctx.db);
+  const roles =
+    await listRoles(ctx.db);
 
-  const chat = await getChat(
-    ctx.db,
-    ctx.user.id,
-    chatId,
-  );
+  const chat =
+    await getChat(
+      ctx.db,
+      ctx.user.id,
+      chatId,
+    );
 
-  await showNavigationScreen(ctx, S.rolesScreen(
+  await showNavigationScreen(
+    ctx,
+    S.rolesScreen(
       ctx.lang,
       roles,
       chat?.role_key ?? null,
-    ), editId);
+    ),
+    editId,
+  );
 }
 
 async function showAccount(
   ctx: Ctx,
   editId?: number,
 ): Promise<void> {
-  // DIAGNOSTIC (temporary): trace exactly where the "👤 Аккаунт" button can stop.
-  logEvent('show_account_start', { userId: ctx.user.id, chatId: ctx.chatId });
-  try {
-    const bal = await getBalance(
+  const bal =
+    await getBalance(
       ctx.db,
       ctx.user.id,
       ctx.settings,
       ctx.now,
     );
 
-    await showNavigationScreen(ctx, S.accountScreen(
-        ctx.lang,
-        ctx.user,
-        bal,
-      ), editId);
-    logEvent('show_account_ok', { userId: ctx.user.id });
-  } catch (e) {
-    logError('show_account_failed', e, { userId: ctx.user.id });
-    throw e;
-  }
+  await showNavigationScreen(
+    ctx,
+    S.accountScreen(
+      ctx.lang,
+      ctx.user,
+      bal,
+    ),
+    editId,
+  );
 }
 
 async function showLanguage(
   ctx: Ctx,
   editId?: number,
 ): Promise<void> {
-  await showNavigationScreen(ctx, S.languageScreen(ctx.lang), editId);
+  await showNavigationScreen(
+    ctx,
+    S.languageScreen(
+      ctx.lang,
+    ),
+    editId,
+  );
 }
 
 async function showHelp(
   ctx: Ctx,
   editId?: number,
 ): Promise<void> {
-  await showNavigationScreen(ctx, S.helpScreen(
+  await showNavigationScreen(
+    ctx,
+    S.helpScreen(
       ctx.lang,
       String(
         Math.max(
@@ -314,21 +427,24 @@ async function showHelp(
           'message_ttl_hours',
         ),
       ),
-    ), editId);
+    ),
+    editId,
+  );
 }
 
 async function showPlans(
   ctx: Ctx,
   editId?: number,
 ): Promise<void> {
-  const featured = (
-    await listPlans(
-      ctx.db,
-      'subscription',
-    )
-  ).filter(
-    (p) => p.is_featured,
-  );
+  const featured =
+    (
+      await listPlans(
+        ctx.db,
+        'subscription',
+      )
+    ).filter(
+      (p) => p.is_featured,
+    );
 
   const dailyModel =
     await firstAvailableModel(
@@ -336,17 +452,22 @@ async function showPlans(
       'chat',
     );
 
-  const advModels = (
-    await listModels(
-      ctx.db,
-      'chat',
-      true,
-    )
-  ).filter(
-    (m) => m.tier === 'advanced',
-  );
+  const advModels =
+    (
+      await listModels(
+        ctx.db,
+        'chat',
+        true,
+      )
+    ).filter(
+      (m) =>
+        m.tier ===
+        'advanced',
+    );
 
-  await showNavigationScreen(ctx, S.plansScreen(
+  await showNavigationScreen(
+    ctx,
+    S.plansScreen(
       ctx.lang,
       String(
         ctx.settings.int(
@@ -356,30 +477,43 @@ async function showPlans(
       dailyModel,
       advModels[0] ?? null,
       featured,
-    ), editId);
+    ),
+    editId,
+  );
 }
 
 async function showPlansMore(
   ctx: Ctx,
   editId?: number,
 ): Promise<void> {
-  const all = (
-    await listPlans(
-      ctx.db,
-      'subscription',
-    )
-  ).filter(
-    (p) => !p.is_featured,
-  );
+  const all =
+    (
+      await listPlans(
+        ctx.db,
+        'subscription',
+      )
+    ).filter(
+      (p) =>
+        !p.is_featured,
+    );
 
-  const kbRows = all.map(
-    (p) => [
-      {
-        text: `${S.planLabel(ctx.lang, p)} · ${S.planPrice(ctx.lang, p)}`,
-        callback_data: `plan:show:${p.key}`,
-      },
-    ],
-  );
+  const kbRows =
+    all.map(
+      (p) => [
+        {
+          text:
+            `${S.planLabel(
+              ctx.lang,
+              p,
+            )} · ${S.planPrice(
+              ctx.lang,
+              p,
+            )}`,
+          callback_data:
+            `plan:show:${p.key}`,
+        },
+      ],
+    );
 
   kbRows.push([
     {
@@ -387,7 +521,8 @@ async function showPlansMore(
         ctx.lang,
         'btn.back_plans',
       ),
-      callback_data: 'goto:plans',
+      callback_data:
+        'goto:plans',
     },
   ]);
 
@@ -397,26 +532,33 @@ async function showPlansMore(
         ctx.lang,
         'btn.to_account',
       ),
-      callback_data: 'goto:account',
+      callback_data:
+        'goto:account',
     },
     {
       text: t(
         ctx.lang,
         'btn.to_chat',
       ),
-      callback_data: 'goto:chat',
+      callback_data:
+        'goto:chat',
     },
   ]);
 
-  await showNavigationScreen(ctx, {
+  await showNavigationScreen(
+    ctx,
+    {
       text: t(
         ctx.lang,
         'plans.more',
       ),
       kb: {
-        inline_keyboard: kbRows,
+        inline_keyboard:
+          kbRows,
       },
-    }, editId);
+    },
+    editId,
+  );
 }
 
 async function showPlanConfirm(
@@ -424,35 +566,53 @@ async function showPlanConfirm(
   planKey: string,
   editId?: number,
 ): Promise<void> {
-  const plan = await getPlan(
-    ctx.db,
-    planKey,
-  );
+  const plan =
+    await getPlan(
+      ctx.db,
+      planKey,
+    );
 
-  if (!plan || !plan.is_active) {
+  if (
+    !plan ||
+    !plan.is_active
+  ) {
     return;
   }
 
   const title =
-    plan.kind === 'subscription'
-      ? S.planLabel(ctx.lang, plan)
-      : S.planLabel(ctx.lang, plan);
+    plan.kind ===
+    'subscription'
+      ? S.planLabel(
+          ctx.lang,
+          plan,
+        )
+      : S.planLabel(
+          ctx.lang,
+          plan,
+        );
 
   const key =
-    plan.kind === 'subscription'
+    plan.kind ===
+    'subscription'
       ? 'plans.confirm'
       : 'plans.confirm_points';
 
   const text =
-    t(ctx.lang, key as never, {
-      title,
-      price: S.planPrice(
-        ctx.lang,
-        plan,
-      ),
-    }) +
+    t(
+      ctx.lang,
+      key as never,
+      {
+        title,
+        price:
+          S.planPrice(
+            ctx.lang,
+            plan,
+          ),
+      },
+    ) +
     (
-      plan.kind === 'subscription'
+      plan.kind ===
+      'subscription'
         ? t(
             ctx.lang,
             'plans.confirm_tail',
@@ -479,7 +639,8 @@ async function showPlanConfirm(
             'btn.back_plans',
           ),
           callback_data:
-            plan.kind === 'subscription'
+            plan.kind ===
+            'subscription'
               ? 'goto:plans'
               : 'goto:points',
         },
@@ -490,35 +651,50 @@ async function showPlanConfirm(
             ctx.lang,
             'btn.to_chat',
           ),
-          callback_data: 'goto:chat',
+          callback_data:
+            'goto:chat',
         },
       ],
     ],
   };
 
-  await showNavigationScreen(ctx, {
+  await showNavigationScreen(
+    ctx,
+    {
       text,
       kb,
-    }, editId);
+    },
+    editId,
+  );
 }
 
 async function showPoints(
   ctx: Ctx,
   editId?: number,
 ): Promise<void> {
-  const plans = await listPlans(
-    ctx.db,
-    'points',
-  );
+  const plans =
+    await listPlans(
+      ctx.db,
+      'points',
+    );
 
-  const kbRows = plans.map(
-    (p) => [
-      {
-        text: `${S.planLabel(ctx.lang, p)} · ${S.planPrice(ctx.lang, p)}`,
-        callback_data: `plan:show:${p.key}`,
-      },
-    ],
-  );
+  const kbRows =
+    plans.map(
+      (p) => [
+        {
+          text:
+            `${S.planLabel(
+              ctx.lang,
+              p,
+            )} · ${S.planPrice(
+              ctx.lang,
+              p,
+            )}`,
+          callback_data:
+            `plan:show:${p.key}`,
+        },
+      ],
+    );
 
   kbRows.push([
     {
@@ -526,26 +702,33 @@ async function showPoints(
         ctx.lang,
         'btn.to_account',
       ),
-      callback_data: 'goto:account',
+      callback_data:
+        'goto:account',
     },
     {
       text: t(
         ctx.lang,
         'btn.to_chat',
       ),
-      callback_data: 'goto:chat',
+      callback_data:
+        'goto:chat',
     },
   ]);
 
-  await showNavigationScreen(ctx, {
+  await showNavigationScreen(
+    ctx,
+    {
       text: t(
         ctx.lang,
         'plans.points',
       ),
       kb: {
-        inline_keyboard: kbRows,
+        inline_keyboard:
+          kbRows,
       },
-    }, editId);
+    },
+    editId,
+  );
 }
 
 async function buyPlan(
@@ -553,12 +736,16 @@ async function buyPlan(
   planKey: string,
   editId?: number,
 ): Promise<void> {
-  const plan = await getPlan(
-    ctx.db,
-    planKey,
-  );
+  const plan =
+    await getPlan(
+      ctx.db,
+      planKey,
+    );
 
-  if (!plan || !plan.is_active) {
+  if (
+    !plan ||
+    !plan.is_active
+  ) {
     return;
   }
 
@@ -581,20 +768,22 @@ async function buyPlan(
     return;
   }
 
-  const title = S.planLabel(
-    ctx.lang,
-    plan,
-  );
+  const title =
+    S.planLabel(
+      ctx.lang,
+      plan,
+    );
 
-  const order = await createOrder(
-    ctx.db,
-    ctx.user.id,
-    plan,
-    title,
-    title,
-    ctx.now,
-    3600 * 24,
-  );
+  const order =
+    await createOrder(
+      ctx.db,
+      ctx.user.id,
+      plan,
+      title,
+      title,
+      ctx.now,
+      3600 * 24,
+    );
 
   await showOrder(
     ctx,
@@ -607,15 +796,18 @@ async function showOrders(
   ctx: Ctx,
   editId?: number,
 ): Promise<void> {
-  const orders = await listOrders(
-    ctx.db,
-    ctx.user.id,
-    ctx.settings.int(
-      'orders_page_size',
-    ),
-  );
+  const orders =
+    await listOrders(
+      ctx.db,
+      ctx.user.id,
+      ctx.settings.int(
+        'orders_page_size',
+      ),
+    );
 
-  await showNavigationScreen(ctx, S.ordersListScreen(
+  await showNavigationScreen(
+    ctx,
+    S.ordersListScreen(
       ctx.lang,
       orders,
       String(
@@ -623,7 +815,9 @@ async function showOrders(
           'orders_page_size',
         ),
       ),
-    ), editId);
+    ),
+    editId,
+  );
 }
 
 async function showOrder(
@@ -631,20 +825,25 @@ async function showOrder(
   orderId: string,
   editId?: number,
 ): Promise<void> {
-  const order = await getOrder(
-    ctx.db,
-    ctx.user.id,
-    orderId,
-  );
+  const order =
+    await getOrder(
+      ctx.db,
+      ctx.user.id,
+      orderId,
+    );
 
   if (!order) {
     return;
   }
 
-  await showNavigationScreen(ctx, S.orderCardScreen(
+  await showNavigationScreen(
+    ctx,
+    S.orderCardScreen(
       ctx.lang,
       order,
-    ), editId);
+    ),
+    editId,
+  );
 }
 
 async function checkOrder(
@@ -652,8 +851,6 @@ async function checkOrder(
   orderId: string,
   editId?: number,
 ): Promise<void> {
-  // No payment provider is wired in V1.
-  // This only re-renders the current order status.
   await showOrder(
     ctx,
     orderId,
@@ -661,7 +858,8 @@ async function checkOrder(
   );
 }
 
-// ---------------------------------------------------------------- commands
+// ----------------------------------------------------------------
+// commands
 
 export async function handleCommand(
   ctx: Ctx,
@@ -674,16 +872,13 @@ export async function handleCommand(
     .trim()
     .split(/\s+/);
 
-  const cmd = (
-    cmdRaw ?? ''
-  )
-    .replace(
-      /@\w+$/,
-      '',
-    )
-    .toLowerCase();
-
-  const arg = rest.join(' ');
+  const cmd =
+    (cmdRaw ?? '')
+      .replace(
+        /@\w+$/,
+        '',
+      )
+      .toLowerCase();
 
   if (
     cmd.startsWith('/') &&
@@ -706,13 +901,21 @@ export async function handleCommand(
     case '/start':
       await ctx.tg.sendMessage(
         ctx.chatId,
-        t(ctx.lang, 'welcome'),
+        t(
+          ctx.lang,
+          'welcome',
+        ),
         {
-          markup: mainReplyKeyboard(ctx.lang),
+          markup:
+            mainReplyKeyboard(
+              ctx.lang,
+            ),
         },
       );
 
-      await showMainMenu(ctx);
+      await showMainMenu(
+        ctx,
+      );
       return;
 
     case '/menu':
@@ -745,18 +948,10 @@ export async function handleCommand(
       return;
 
     case '/images':
-      await showUiScreen(
-        ctx.tg,
-        ctx.db,
-        ctx.user.id,
-        ctx.chatId,
-        S.soonScreen(
-          ctx.lang,
-        ),
-      );
-      return;
-
     case '/templates':
+    case '/files':
+    case '/voice':
+    case '/speak':
       await showUiScreen(
         ctx.tg,
         ctx.db,
@@ -776,18 +971,6 @@ export async function handleCommand(
       await showSearch(ctx);
       return;
 
-    case '/files':
-      await showUiScreen(
-        ctx.tg,
-        ctx.db,
-        ctx.user.id,
-        ctx.chatId,
-        S.soonScreen(
-          ctx.lang,
-        ),
-      );
-      return;
-
     case '/roles': {
       const chat =
         await ensureCurrentChat(
@@ -801,30 +984,6 @@ export async function handleCommand(
 
       return;
     }
-
-    case '/voice':
-      await showUiScreen(
-        ctx.tg,
-        ctx.db,
-        ctx.user.id,
-        ctx.chatId,
-        S.soonScreen(
-          ctx.lang,
-        ),
-      );
-      return;
-
-    case '/speak':
-      await showUiScreen(
-        ctx.tg,
-        ctx.db,
-        ctx.user.id,
-        ctx.chatId,
-        S.soonScreen(
-          ctx.lang,
-        ),
-      );
-      return;
 
     case '/rename': {
       const chat =
@@ -984,7 +1143,8 @@ async function chatNew(
   );
 }
 
-// ---------------------------------------------------------------- callbacks
+// ----------------------------------------------------------------
+// callbacks
 
 export async function handleCallback(
   ctx: Ctx,
@@ -1029,7 +1189,7 @@ export async function handleCallback(
 
     await handleAdminCallback(
       ctx,
-      rest ?? '',
+      rest,
       editId,
     );
 
@@ -1042,7 +1202,10 @@ export async function handleCallback(
     switch (action) {
       case 'menu':
         return void (
-          await showMainMenu(ctx, editId)
+          await showMainMenu(
+            ctx,
+            editId,
+          )
         );
 
       case 'chat':
@@ -1056,7 +1219,10 @@ export async function handleCallback(
 
       case 'models':
         return void (
-          await showModels(ctx, editId)
+          await showModels(
+            ctx,
+            editId,
+          )
         );
 
       case 'chats':
@@ -1075,19 +1241,27 @@ export async function handleCallback(
         return void (
           await showNavigationScreen(
             ctx,
-            S.soonScreen(ctx.lang),
+            S.soonScreen(
+              ctx.lang,
+            ),
             editId,
           )
         );
 
       case 'tools':
         return void (
-          await showTools(ctx, editId)
+          await showTools(
+            ctx,
+            editId,
+          )
         );
 
       case 'search':
         return void (
-          await showSearch(ctx, editId)
+          await showSearch(
+            ctx,
+            editId,
+          )
         );
 
       case 'roles': {
@@ -1107,32 +1281,50 @@ export async function handleCallback(
 
       case 'account':
         return void (
-          await showAccount(ctx, editId)
+          await showAccount(
+            ctx,
+            editId,
+          )
         );
 
       case 'language':
         return void (
-          await showLanguage(ctx, editId)
+          await showLanguage(
+            ctx,
+            editId,
+          )
         );
 
       case 'help':
         return void (
-          await showHelp(ctx, editId)
+          await showHelp(
+            ctx,
+            editId,
+          )
         );
 
       case 'plans':
         return void (
-          await showPlans(ctx, editId)
+          await showPlans(
+            ctx,
+            editId,
+          )
         );
 
       case 'points':
         return void (
-          await showPoints(ctx, editId)
+          await showPoints(
+            ctx,
+            editId,
+          )
         );
 
       case 'orders':
         return void (
-          await showOrders(ctx, editId)
+          await showOrders(
+            ctx,
+            editId,
+          )
         );
     }
 
@@ -1146,7 +1338,10 @@ export async function handleCallback(
       action === 'new'
     ) {
       return void (
-        await chatNew(ctx, editId)
+        await chatNew(
+          ctx,
+          editId,
+        )
       );
     }
 
@@ -1253,7 +1448,10 @@ export async function handleCallback(
       return void (
         await showNavigationScreen(
           ctx,
-          S.deleteConfirmScreen(ctx.lang, chat),
+          S.deleteConfirmScreen(
+            ctx.lang,
+            chat,
+          ),
           editId,
         )
       );
@@ -1343,7 +1541,10 @@ export async function handleCallback(
       key,
     );
 
-    await showModels(ctx, editId);
+    await showModels(
+      ctx,
+      editId,
+    );
 
     return {
       toast: t(
@@ -1366,7 +1567,10 @@ export async function handleCallback(
       key,
     );
 
-    await showSearch(ctx, editId);
+    await showSearch(
+      ctx,
+      editId,
+    );
 
     return;
   }
@@ -1441,7 +1645,9 @@ export async function handleCallback(
     action === 'set'
   ) {
     const lang =
-      normLang(args[0]);
+      normLang(
+        args[0],
+      );
 
     await setLanguage(
       ctx.db,
@@ -1451,7 +1657,10 @@ export async function handleCallback(
 
     ctx.lang = lang;
 
-    await showLanguage(ctx, editId);
+    await showLanguage(
+      ctx,
+      editId,
+    );
 
     await ctx.tg.safe(
       ctx.tg.sendMessage(
@@ -1500,7 +1709,10 @@ export async function handleCallback(
     action === 'more'
   ) {
     return void (
-      await showPlansMore(ctx, editId)
+      await showPlansMore(
+        ctx,
+        editId,
+      )
     );
   }
 
@@ -1567,7 +1779,8 @@ export async function handleCallback(
   }
 }
 
-// ---------------------------------------------------------------- plain text
+// ----------------------------------------------------------------
+// plain text
 
 export async function handleText(
   ctx: Ctx,
@@ -1576,10 +1789,7 @@ export async function handleText(
   /*
    * Telegram Reply Keyboard buttons are received as ordinary text.
    *
-   * Handle them BEFORE sending text to the AI model.
-   *
-   * Navigation screens use showUiScreen(), so they reuse the
-   * dedicated UI message instead of creating a new message.
+   * Handle them before sending text to the AI model.
    */
 
   if (
@@ -1669,13 +1879,6 @@ export async function handleText(
 
     return;
   }
-
-  /*
-   * The following messages are user interactions/results,
-   * NOT navigation UI.
-   *
-   * They remain normal Telegram messages.
-   */
 
   if (
     ctx.user.mode ===
@@ -1865,11 +2068,8 @@ export async function handleText(
   }
 
   /*
-   * AI answer is intentionally NOT passed through showUiScreen().
-   *
-   * answerAndSend() sends a normal Telegram message.
-   * Therefore the AI answer stays in the chat and is never replaced
-   * when the user later opens Account, Tools, Models, etc.
+   * AI answer stays as a normal Telegram message.
+   * Navigation screens are handled separately.
    */
 
   const outcome =
