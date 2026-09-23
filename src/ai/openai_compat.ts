@@ -7,6 +7,7 @@ function endpointFor(model:Model,env:Env){
   if(model.provider==='openai'){apiKey=env.OPENAI_API_KEY;baseUrl='https://api.openai.com/v1';}
   else if(model.provider==='deepseek'){apiKey=env.DEEPSEEK_API_KEY;baseUrl='https://api.deepseek.com';}
   else if(model.provider==='kimi'){apiKey=env.KIMI_API_KEY;baseUrl='https://api.moonshot.ai/v1';}
+  else if(model.provider==='groq')apiKey=env.GROQ_API_KEY;baseUrl='https://api.groq.com/openai/v1';}
   else {const cfg=JSON.parse(model.config||'{}') as {api_key_env?:string;base_url?:string}; apiKey=cfg.api_key_env ? (env as Record<string,unknown>)[cfg.api_key_env] as string|undefined : undefined;baseUrl=cfg.base_url;}
   if(!apiKey || !baseUrl) throw new Error('PROVIDER_NOT_CONFIGURED');
   return {apiKey,baseUrl:baseUrl.replace(/\/$/,'')};
