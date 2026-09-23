@@ -3601,4 +3601,5 @@ async function cleanup(
     db,
     env
   );
-}
+  }
+};
