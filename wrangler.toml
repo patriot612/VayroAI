@@ -9,7 +9,7 @@ APP_NAME = "VayroAI"
 [[d1_databases]]
 binding = "DB"
 database_name = "vayroai-db"
-database_id = "28871a69-c526-4617-b797-4a7c92a0db60"
+database_id = "e4ca6874-b93f-40b3-b5a4-06394511245f"
 migrations_dir = "migrations"
 
 [ai]
