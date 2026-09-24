@@ -5,7 +5,7 @@ import type { ChatTurn,AiResult,ProviderAdapter,Source } from './types';
 function systemAndContents(messages:ChatTurn[]){const system=messages.find(m=>m.role==='system')?.content;const contents=messages.filter(m=>m.role!=='system').map(m=>({role:m.role==='assistant'?'model':'user',parts:[{text:m.content}]}));return {system,contents};}
 
 export const geminiAdapter:ProviderAdapter={
-  async generate(model:Model,messages:ChatTurn[],env:Env,signal?:AbortSignal):Promise<AiResult>{
+  async generate(model:Model,messages:ChatTurn[],env:Env,signal?:AbortSignal,_options?:unknown):Promise<AiResult>{
     if(!env.GEMINI_API_KEY)throw new Error('PROVIDER_NOT_CONFIGURED');
     let cfg:{max_tokens?:number;temperature?:number;search?:boolean;base_url?:string};
     try{cfg=JSON.parse(model.config||'{}') as any;}catch{throw new Error('MODEL_CONFIG_INVALID');}

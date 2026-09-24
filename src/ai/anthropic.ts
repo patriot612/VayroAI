@@ -3,7 +3,7 @@ import type { Model } from '../db/types';
 import type { ChatTurn,AiResult,ProviderAdapter } from './types';
 
 export const anthropicAdapter:ProviderAdapter={
-  async generate(model:Model,messages:ChatTurn[],env:Env,signal?:AbortSignal):Promise<AiResult>{
+  async generate(model:Model,messages:ChatTurn[],env:Env,signal?:AbortSignal,_options?:unknown):Promise<AiResult>{
     if(!env.ANTHROPIC_API_KEY) throw new Error('PROVIDER_NOT_CONFIGURED');
     let cfg:{max_tokens?:number;temperature?:number};
     try{cfg=JSON.parse(model.config||'{}') as any;}catch{throw new Error('MODEL_CONFIG_INVALID');}
