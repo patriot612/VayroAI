@@ -339,6 +339,9 @@ export function providerConfigured(
 
     case 'kimi':
       return Boolean(env.KIMI_API_KEY);
+
+    case 'xkiro':
+      return Boolean(env.XKIRO_API_KEY); 
     
     case 'groq':
       return Boolean(env.GROQ_API_KEY);
