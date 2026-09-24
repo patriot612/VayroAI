@@ -44,6 +44,31 @@ export async function accountScreen(api:TelegramApi,db:D1Database,user:User,sour
 
 export async function rolesScreen(api:TelegramApi,db:D1Database,user:User,sourceMessageId?:number){const roles=await repo.listRoles(db);const chat=user.current_chat_id?await repo.getChat(db,user.current_chat_id,user.id):null;const uzNames:any={assistant:'Yordamchi',editor:'Muharrir',translator:'Tarjimon',teacher:'O‘qituvchi',programmer:'Dasturchi'};const rows=roles.map(r=>[{text:user.language==='ru'?r.name_ru:user.language==='uz'?(uzNames[r.role_key]??r.name_en):r.name_en,callback_data:`role:set:${r.role_key}`}]);if(chat?.role_key||chat?.custom_role)rows.push([{text:'🧹 Сбросить роль',callback_data:'role:reset'}]);rows.push([{text:t(user.language,'custom_role'),callback_data:'role:custom'}],[{text:t(user.language,'back_chat'),callback_data:'chat:open'}]);return sendOrEditUi(api,db,user,t(user.language,'roles_title')+'\n\n'+t(user.language,'roles_hint'),rows,[],sourceMessageId)}
 
+export async function qwenSettingsScreen(api:TelegramApi,db:D1Database,env:Env,user:User,chat:Chat,sourceMessageId?:number){
+ const model=await repo.modelByKey(db,chat.model_key);
+ if(!model||model.provider!=='xkiro'||model.model_id!=='qwen/qwen3.8-max:free')return sendOrEditUi(api,db,user,t(user.language,'model_unavailable'),[[{text:t(user.language,'back_chat'),callback_data:'chat:open'}]],[],sourceMessageId);
+ const settings=await repo.ensureChatAiSettings(db,user.id,chat.id,model.model_key);
+ const reasoning=settings.reasoning_mode==='fast'?t(user.language,'qwen_reasoning_fast'):settings.reasoning_mode==='max'?t(user.language,'qwen_reasoning_max'):t(user.language,'qwen_reasoning_deep');
+ const web=settings.web_search_enabled? t(user.language,'qwen_web_search_on'):t(user.language,'qwen_web_search_off');
+ const text=[t(user.language,'qwen_settings_title'),t(user.language,'qwen_settings_hint'),t(user.language,'qwen_reasoning_current',{mode:reasoning}),t(user.language,'qwen_web_current',{state:web})].join('\n\n');
+ const rows=[
+  [{text:`${t(user.language,'qwen_reasoning')} · ${reasoning}`,callback_data:'qwen:reasoning'}],
+  [{text:`${t(user.language,'qwen_web_search')} · ${web}`,callback_data:'qwen:web'}],
+  [{text:t(user.language,'qwen_reset_settings'),callback_data:'qwen:reset'}],
+  [{text:t(user.language,'back_chat'),callback_data:'chat:open'}]
+ ];
+ return sendOrEditUi(api,db,user,text,rows,[],sourceMessageId);
+}
+
+export async function qwenReasoningScreen(api:TelegramApi,db:D1Database,user:User,chat:Chat,sourceMessageId?:number){
+ const model=await repo.modelByKey(db,chat.model_key);if(!model||model.model_id!=='qwen/qwen3.8-max:free')return;
+ const settings=await repo.ensureChatAiSettings(db,user.id,chat.id,model.model_key);
+ const labels:[string,string][]=[['fast',t(user.language,'qwen_reasoning_fast')],['deep',t(user.language,'qwen_reasoning_deep')],['max',t(user.language,'qwen_reasoning_max')]];
+ const rows=labels.map(([key,label])=>[{text:`${settings.reasoning_mode===key?'✅ ':''}${label}`,callback_data:`qwen:setreasoning:${key}`}]);
+ rows.push([{text:t(user.language,'back'),callback_data:'qwen:settings'}]);
+ return sendOrEditUi(api,db,user,t(user.language,'qwen_reasoning'),rows,[],sourceMessageId);
+}
+
 export async function searchScreen(api:TelegramApi,db:D1Database,env:Env,user:User,sourceMessageId?:number){if(Number((await repo.getSetting(db,'feature_search'))??1)===0)return sendOrEditUi(api,db,user,t(user.language,'search_title')+'\n\n'+t(user.language,'no_search_models'),[[{text:t(user.language,'back_chat'),callback_data:'chat:open'}]],[],sourceMessageId);const models=await repo.listSearchModels(db,env);if(!models.length)return sendOrEditUi(api,db,user,t(user.language,'search_title')+'\n\n'+t(user.language,'no_search_models'),[[{text:t(user.language,'back_chat'),callback_data:'chat:open'}]],[],sourceMessageId);const rows=models.map(m=>[{text:`${user.search_model_key===m.model_key?'✅ ':''}${repo.modelEmoji(m)} ${m.name} · ${m.cost}`,callback_data:`search:set:${encodeURIComponent(m.model_key)}`}]);rows.push([{text:t(user.language,'search_back'),callback_data:'search:back'}]);return sendOrEditUi(api,db,user,t(user.language,'search_title')+'\n\n'+t(user.language,'search_hint'),rows,[],sourceMessageId)}
 
 const planTitle=(u:User,p:Plan)=>u.language==='ru'?p.title_ru:p.title_en;
