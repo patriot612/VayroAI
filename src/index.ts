@@ -3682,7 +3682,7 @@ async function handleVisionMessage(text:string,user:any,env:Env,ctx:ExecutionCon
     const qsettings=await repo.ensureChatAiSettings(env.DB,user.id,chat.id,model.model_key);
     const messages:any[]=[{role:'system',content:rolePrompt},{role:'system',content:'Отвечай по запросу пользователя. Никогда не создавай изображения через чат. Анализируй изображения только если они присланы пользователем.'},...history.map(m=>({role:m.role,content:m.content})),{role:'user',content:[{type:'image_url',image_url:{url:`data:image/jpeg;base64,${b64}`}},{type:'text',text}]}];
     const controller=new AbortController();
-    const result=await withTimeout(()=>generate(model,messages,env,controller.signal,{reasoning_effort:reasoningEffort(qsettings.reasoning_mode),web_search:qsettings.web_search_enabled===1}),Math.max(3000,Math.min(120000,Number((await repo.getSetting(env.DB,'ai_timeout_ms'))??25000))),()=>controller.abort());
+    const result=await withTimeout(()=>generate(model,messages,env,controller.signal,{reasoning_effort:reasoningEffort(qsettings.reasoning_mode),web_search:qsettings.web_search_enabled===1}),Math.max(3000,Math.min(300000,Number((await repo.getSetting(env.DB,'ai_timeout_ms'))??25000))),()=>controller.abort());
     await repo.saveMessages(env.DB,chat.id,user.id,text,result.text,model.cost,Math.min(24,Number((await repo.getSetting(env.DB,'message_ttl_hours'))??24)));
     if(holdId){await repo.captureHold(env.DB,holdId);holdId=undefined;}
     if(progressMessageId){try{await api.deleteMessage(user.id,progressMessageId)}catch{}}
