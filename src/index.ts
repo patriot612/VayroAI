@@ -14,6 +14,7 @@ import { generate, generateStream } from './ai/router';
 import * as screens from './ui/screens';
 import * as admin from './admin';
 import { IMAGE_TEMPLATES, composePrompt, generateImage } from './image/service';
+import { claimUpdate, completeUpdate, failUpdate } from './telegram/update-queue';
 
 const START_DELAY_MS = 350;
 
@@ -181,20 +182,27 @@ async function handleUpdate(
   env: Env,
   ctx: ExecutionContext
 ) {
-  const duplicate =
-    await env.DB
-      .prepare(
-        'INSERT INTO processed_updates(update_id,created_at) VALUES(?,?) ON CONFLICT(update_id) DO NOTHING'
-      )
-      .bind(
-        update.update_id,
-        nowIso()
-      )
-      .run();
+  if (!(await claimUpdate(env.DB, update.update_id))) return;
+  try {
+    await processUpdate(update, env, ctx);
+    await completeUpdate(env.DB, update.update_id);
+  } catch (err) {
+    try {
+      await failUpdate(env.DB, update.update_id, err);
+    } catch (queueErr) {
+      console.error('update_queue_fail_mark_error', String(queueErr));
+    }
+    throw err;
+  }
+}
 
-  if (
-    (duplicate.meta?.changes ?? 0) === 0
-  ) {
+async function processUpdate(
+  update: TgUpdate,
+  env: Env,
+  ctx: ExecutionContext
+) {
+  if (update.pre_checkout_query) {
+    await handlePreCheckoutQuery(update.pre_checkout_query, env);
     return;
   }
 
@@ -224,12 +232,20 @@ async function handleUpdate(
     user.id
   );
 
-  if (user.is_blocked) {
+  const api =
+    new TelegramApi(env);
+
+  // Payment settlement must run even for a blocked user: the bot must not
+  // leave a successfully paid Telegram Stars order pending just because the
+  // user is blocked in the application.
+  if (message.successful_payment) {
+    await handleSuccessfulPayment(message, user, env, api);
     return;
   }
 
-  const api =
-    new TelegramApi(env);
+  if (user.is_blocked) {
+    return;
+  }
 
   if (
     await admin.receiveBroadcastContent(
@@ -1075,7 +1091,7 @@ async function handleCommand(
         user.id,
         t(
           user.language,
-          'payment_off'
+          'payment_support'
         )
       );
       break;
@@ -1132,6 +1148,104 @@ async function handleCommand(
       );
       break;
   }
+}
+
+
+function planTitleForPayment(user:any,plan:any){
+  return user.language==='ru' ? plan.title_ru : plan.title_en;
+}
+
+async function handlePreCheckoutQuery(
+  query: import('./telegram/types').TgPreCheckoutQuery,
+  env: Env
+) {
+  const api = new TelegramApi(env);
+  const payload = String(query.invoice_payload ?? '');
+  const m = /^vayro_stars:([A-Za-z0-9_]+)$/.exec(payload);
+  if (!m) {
+    await api.answerPreCheckoutQuery(query.id,false,'Платёж недействителен. Откройте оплату заново.');
+    return;
+  }
+
+  if (!await repo.isPaymentMethodEnabled(env.DB,'telegram_stars')) {
+    await api.answerPreCheckoutQuery(query.id,false,'Этот способ оплаты временно недоступен. Попробуйте позже.');
+    return;
+  }
+
+  const order = await first<any>(
+    env.DB.prepare('SELECT * FROM orders WHERE id=?').bind(m[1])
+  );
+
+  const valid =
+    order &&
+    Number(order.user_id) === Number(query.from.id) &&
+    order.status === 'pending' &&
+    order.provider === 'telegram_stars' &&
+    order.currency === 'XTR' &&
+    Number(order.amount_minor) === Number(query.total_amount) &&
+    String(query.currency) === 'XTR' &&
+    (!order.expires_at || new Date(order.expires_at).getTime() > Date.now());
+
+  if (!valid) {
+    await api.answerPreCheckoutQuery(
+      query.id,
+      false,
+      'Платёж недействителен или срок заказа истёк. Создайте новый счёт.'
+    );
+    return;
+  }
+
+  await api.answerPreCheckoutQuery(query.id,true);
+}
+
+async function handleSuccessfulPayment(
+  message: TgMessage,
+  user: any,
+  env: Env,
+  api: TelegramApi
+) {
+  const payment = message.successful_payment;
+  if (!payment) return;
+
+  const payload = String(payment.invoice_payload ?? '');
+  const m = /^vayro_stars:([A-Za-z0-9_]+)$/.exec(payload);
+  if (!m || payment.currency !== 'XTR') {
+    await safeSend(api,user.id,t(user.language,'payment_error'));
+    return;
+  }
+
+  const result = await repo.completeTelegramStarsOrder(
+    env.DB,
+    m[1],
+    user.id,
+    Number(payment.total_amount),
+    String(payment.telegram_payment_charge_id)
+  );
+
+  if (!result) {
+    console.error('telegram_stars_payment_activation_failed', {
+      orderId:m[1],
+      userId:user.id,
+      chargeId:payment.telegram_payment_charge_id,
+      amount:payment.total_amount
+    });
+    await safeSend(api,user.id,t(user.language,'payment_error'));
+    return;
+  }
+
+  if (result.alreadyPaid) {
+    return;
+  }
+
+  await safeSend(
+    api,
+    user.id,
+    t(user.language,'payment_success',{
+      plan:planTitleForPayment(user,result.plan),
+      expires:result.expiresAt ?? '—',
+      points:result.points ?? 0
+    })
+  );
 }
 
 async function handleCallback(
@@ -1398,7 +1512,7 @@ async function handleCallback(
         env
       );
 
-    if (!model) {
+    if (!model || model.type !== 'chat') {
       await safeSend(
         api,
         user.id,
@@ -1711,7 +1825,8 @@ async function handleCallback(
       if(Number((await repo.getSetting(env.DB,'feature_search'))??1)===0 && !isAdmin(env,user.id)){await safeSend(api,user.id,t(user.language,'coming_soon'));return;}
       const m=await repo.getUsableModel(env.DB,args[1],env);
 
-      if (!m) {
+      if (!m || m.type !== 'search') {
+        await safeSend(api,user.id,t(user.language,'not_found'));
         return;
       }
 
@@ -1753,58 +1868,62 @@ async function handleCallback(
     }
   }
 
-  if (
-    action === 'plan' &&
-    args[0] === 'create'
-  ) {
-    const plan =
-      await repo.getPlan(
-        env.DB,
-        args[1]
-      );
+  if (action === 'pay' && args[0] === 'methods') {
+    const enabled = await repo.isPaymentMethodEnabled(env.DB,'telegram_stars');
+    if (!enabled) {
+      await safeSend(api,user.id,t(user.language,'payment_unavailable'));
+      return;
+    }
+    await screens.paymentMethodsScreen(api,env.DB,user,args[1],sourceMessageId);
+    return;
+  }
 
-    if (plan) {
-      const enabled =
-        Number(
-          (await repo.getSetting(
-            env.DB,
-            'feature_payments'
-          )) ?? 0
-        ) === 1;
-
-      if (!enabled) {
-        await safeSend(
-          api,
-          user.id,
-          t(
-            user.language,
-            'payment_off'
-          )
-        );
-
-        return;
-      }
-
-      const order =
-        await repo.createOrder(
-          env.DB,
-          user.id,
-          plan
-        );
-
-      await safeSend(
-        api,
-        user.id,
-        t(
-          user.language,
-          'order_created',
-          {
-            id: order.id
-          }
-        )
-      );
+  if (action === 'pay' && args[0] === 'stars') {
+    const enabled = await repo.isPaymentMethodEnabled(env.DB,'telegram_stars');
+    if (!enabled) {
+      await safeSend(api,user.id,t(user.language,'payment_unavailable'));
+      return;
     }
 
+    const plan = await repo.getPlan(env.DB,args[1]);
+    if (!plan || !plan.is_active || plan.kind !== 'subscription' || !plan.duration_days) {
+      await safeSend(api,user.id,t(user.language,'not_found'));
+      return;
+    }
+
+    const stars = await repo.getPlanPaymentPrice(env.DB,plan.plan_key,'telegram_stars');
+    if (!stars?.amount || stars.currency !== 'XTR') {
+      await safeSend(api,user.id,t(user.language,'payment_unavailable'));
+      return;
+    }
+
+    const order = await repo.createProviderOrder(
+      env.DB,
+      user.id,
+      plan,
+      'telegram_stars',
+      Number(stars.amount),
+      'XTR'
+    );
+
+    try {
+      await api.sendInvoice(
+        user.id,
+        t(user.language,'payment_invoice_title'),
+        `${t(user.language,'payment_invoice_description')} ${planTitleForPayment(user,plan)} · ${stars.amount} ⭐`,
+        `vayro_stars:${order.id}`,
+        Number(stars.amount)
+      );
+
+      if (sourceMessageId) {
+        try { await api.deleteMessage(user.id,sourceMessageId); } catch {}
+        await env.DB.prepare('UPDATE users SET ui_message_id=NULL WHERE id=?').bind(user.id).run();
+      }
+    } catch (err) {
+      console.error('telegram_stars_invoice_error',String(err));
+      await env.DB.prepare("UPDATE orders SET status='cancelled' WHERE id=? AND status='pending'").bind(order.id).run();
+      await safeSend(api,user.id,t(user.language,'payment_unavailable'));
+    }
     return;
   }
 
@@ -1881,9 +2000,22 @@ async function handleCallback(
       return admin.adminModels(api,env.DB,env,user,sourceMessageId);
     }
     if(args[0]==='prices') return admin.adminPrices(api,env.DB,user,sourceMessageId);
+    if(args[0]==='payments') return admin.adminPayments(api,env.DB,user,sourceMessageId);
+    if(args[0]==='refund') return admin.adminRefundDetails(api,env.DB,user,args[1]??'',sourceMessageId);
+    if(args[0]==='refund_confirm') return admin.refundStars(api,env.DB,user,args[1]??'',args[2]==='revoke',sourceMessageId);
     if(args[0]==='subs') return admin.adminSubs(api,env.DB,user,sourceMessageId);
     if(args[0]==='points') return admin.adminPoints(api,env.DB,user,sourceMessageId);
     if(args[0]==='features') return admin.adminFeatures(api,env.DB,user,sourceMessageId);
+    if(args[0]==='paymenttoggle'){
+      const provider=args[1];
+      const result=await admin.togglePaymentMethod(api,env.DB,provider);
+      if(!result.ok){
+        await safeSend(api,user.id,t(user.language,'not_found'));
+      } else {
+        await adminAudit(env.DB,user.id,`payment_method:${provider}:${result.enabled?'on':'off'}`);
+      }
+      return admin.adminFeatures(api,env.DB,user,sourceMessageId);
+    }
     if(args[0]==='modeldelete'){const result=await admin.deleteModel(api,env.DB,decodeURIComponent(args.slice(1).join(':')));if(!result.ok){await safeSend(api,user.id,result.reason==='default_model'?'Нельзя удалить модель по умолчанию.':result.reason==='in_use'?'Нельзя удалить модель, используемую существующими диалогами.':t(user.language,'not_found'));}return admin.adminModels(api,env.DB,env,user,sourceMessageId);}
 
 
@@ -3396,6 +3528,7 @@ const editableSettings =
     'feature_docs',
     'feature_voice',
     'feature_payments',
+    'payment_method_telegram_stars',
     'orders_page_size',
     'default_model_key'
   ]);
@@ -3452,7 +3585,7 @@ async function cmdSetting(
     return;
   }
 
-  if (['confirm_purchased_spend','auto_title','feature_chat','feature_image','feature_docs','feature_voice','feature_payments'].includes(key) && !/^[01]$/.test(value)) {
+  if (['confirm_purchased_spend','auto_title','feature_chat','feature_image','feature_docs','feature_voice','feature_payments','payment_method_telegram_stars'].includes(key) && !/^[01]$/.test(value)) {
     await safeSend(api,user.id,t(user.language,'invalid_args'));
     return;
   }
@@ -3501,7 +3634,7 @@ async function cmdSetting(
   );
 }
 
-async function cmdPrice(api:TelegramApi,user:any,env:Env,parts:string[]){if(!await requireAdmin(api,user,env))return;const target=parts[0]??'',raw=parts[1]??'';if(!target||!/^[0-9]+(?:[.,][0-9]{1,2})?$/.test(raw)){await safeSend(api,user.id,t(user.language,'invalid_args'));return}const amount=Math.round(Number(raw.replace(',','.'))*100);if(target.startsWith('template:')){const id=target.slice(9);if(!id||!IMAGE_TEMPLATES.some(x=>x.id===id)){await safeSend(api,user.id,t(user.language,'not_found'));return}await repo.setSetting(env.DB,`image_template_price_${id}`,String(Math.round(amount/100)));await adminAudit(env.DB,user.id,`price:${target}:${raw}`);await safeSend(api,user.id,t(user.language,'done'));return}if(target==='image_input'){await repo.setSetting(env.DB,'image_input_cost',String(Math.round(amount/100)));await adminAudit(env.DB,user.id,`price:${target}:${raw}`);await safeSend(api,user.id,t(user.language,'done'));return}const plan=await repo.getPlan(env.DB,target);if(plan){await env.DB.prepare('UPDATE plans SET price_minor=? WHERE plan_key=?').bind(amount,target).run();await adminAudit(env.DB,user.id,`price:${target}:${raw}`);await safeSend(api,user.id,t(user.language,'done'));return}const model=await repo.modelByKey(env.DB,target);if(model){await env.DB.prepare('UPDATE models SET cost=? WHERE model_key=?').bind(Math.max(0,Math.round(Number(raw.replace(',','.')))),target).run();await adminAudit(env.DB,user.id,`price:${target}:${raw}`);await safeSend(api,user.id,t(user.language,'done'));return}await safeSend(api,user.id,t(user.language,'not_found'))}
+async function cmdPrice(api:TelegramApi,user:any,env:Env,parts:string[]){if(!await requireAdmin(api,user,env))return;const target=parts[0]??'',raw=parts[1]??'';if(target.startsWith('stars:')){const planKey=target.slice(6);const plan=await repo.getPlan(env.DB,planKey);const stars=Number(raw);if(!plan||plan.kind!=='subscription'||!plan.duration_days||!/^\d+$/.test(raw)||stars<1||stars>10000){await safeSend(api,user.id,t(user.language,'invalid_args'));return}await repo.setPlanPaymentPrice(env.DB,planKey,'telegram_stars','XTR',stars);await adminAudit(env.DB,user.id,`stars_price:${planKey}:${stars}`);await safeSend(api,user.id,t(user.language,'done'));return}if(!target||!/^[0-9]+(?:[.,][0-9]{1,2})?$/.test(raw)){await safeSend(api,user.id,t(user.language,'invalid_args'));return}const amount=Math.round(Number(raw.replace(',','.'))*100);if(target.startsWith('template:')){const id=target.slice(9);if(!id||!IMAGE_TEMPLATES.some(x=>x.id===id)){await safeSend(api,user.id,t(user.language,'not_found'));return}await repo.setSetting(env.DB,`image_template_price_${id}`,String(Math.round(amount/100)));await adminAudit(env.DB,user.id,`price:${target}:${raw}`);await safeSend(api,user.id,t(user.language,'done'));return}if(target==='image_input'){await repo.setSetting(env.DB,'image_input_cost',String(Math.round(amount/100)));await adminAudit(env.DB,user.id,`price:${target}:${raw}`);await safeSend(api,user.id,t(user.language,'done'));return}const plan=await repo.getPlan(env.DB,target);if(plan){await env.DB.prepare('UPDATE plans SET price_minor=? WHERE plan_key=?').bind(amount,target).run();await adminAudit(env.DB,user.id,`price:${target}:${raw}`);await safeSend(api,user.id,t(user.language,'done'));return}const model=await repo.modelByKey(env.DB,target);if(model){await env.DB.prepare('UPDATE models SET cost=? WHERE model_key=?').bind(Math.max(0,Math.round(Number(raw.replace(',','.')))),target).run();await adminAudit(env.DB,user.id,`price:${target}:${raw}`);await safeSend(api,user.id,t(user.language,'done'));return}await safeSend(api,user.id,t(user.language,'not_found'))}
 
 async function adminAudit(db:D1Database,adminId:number,action:string){try{await db.prepare('INSERT INTO usage_logs(id,user_id,kind,model_key,status,error_code,points,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?)').bind(uuid(),adminId,'admin_action',action,'ok',null,0,0,nowIso()).run()}catch{}}
 
@@ -3524,10 +3657,18 @@ async function safeSend(
       }
     );
   } catch (err) {
+    const message=String(err);
     console.error(
       'send_error',
-      String(err)
+      message
     );
+    if(/can't parse entities|can't find end tag|parse error/i.test(message)) {
+      try {
+        const fallback={...extra};
+        delete (fallback as any).parse_mode;
+        await api.sendMessage(chatId,text,{disable_web_page_preview:true,...fallback});
+      } catch {}
+    }
   }
 }
 
@@ -3916,14 +4057,11 @@ async function cleanup(
 
     db
       .prepare(
-        "DELETE FROM processed_updates WHERE created_at<?"
+        "DELETE FROM processed_updates WHERE (status='completed' AND updated_at<?) OR (status='failed' AND updated_at<?)"
       )
       .bind(
-        new Date(
-          Date.now() -
-            2 *
-              86400000
-        ).toISOString()
+        new Date(Date.now()-2*86400000).toISOString(),
+        new Date(Date.now()-7*86400000).toISOString()
       ),
 
     db
