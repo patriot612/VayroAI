@@ -4,6 +4,7 @@ import { splitTelegramText } from '../src/utils/text.ts';
 import { shouldRetryUpdate } from '../src/telegram/update-queue-logic.ts';
 import { validateStarRefund } from '../src/telegram/stars.ts';
 import { dialogMessageLimitForPlan, DEFAULT_USER_MESSAGE_MAX_CHARS } from '../src/utils/chat-limits.ts';
+import { hasSearchEvidence, isSearchInsufficientAnswer, stripSearchEvidenceMarkers } from '../src/ai/web_search.ts';
 
 test('update queue does not retry a fresh processing update', () => {
   const now = Date.parse('2026-09-25T12:00:00.000Z');
@@ -70,4 +71,13 @@ test('dialog message limits count only user messages by tier', () => {
   assert.equal(dialogMessageLimitForPlan('sub-1m'), 100);
   assert.equal(dialogMessageLimitForPlan('sub-2y'), 200);
   assert.equal(DEFAULT_USER_MESSAGE_MAX_CHARS, 4096);
+});
+
+
+test('search answer must cite at least one returned source', () => {
+  assert.equal(hasSearchEvidence('Ответ [[1]]', 3), true);
+  assert.equal(hasSearchEvidence('Ответ без источника', 3), false);
+  assert.equal(hasSearchEvidence('Ответ [[4]]', 3), false);
+  assert.equal(isSearchInsufficientAnswer('SEARCH_UNAVAILABLE'), true);
+  assert.equal(stripSearchEvidenceMarkers('Ответ [[1]] и [[2]].'), 'Ответ и .');
 });
