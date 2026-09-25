@@ -1,6 +1,6 @@
 import type { Env } from '../env';
 import { all, first, nowIso, placeholders, uuid } from './db';
-import type { Chat, Model, Order, Plan, Role, User, Lang } from './types';
+import type { Chat, Model, Order, Plan, Role, User, Lang, PlanPaymentPrice } from './types';
 
 export async function getUser(db: D1Database, userId: number): Promise<User | null> {
   return first<User>(db.prepare('SELECT * FROM users WHERE id = ?').bind(userId));
@@ -40,8 +40,11 @@ export async function upsertUser(
     (await getSetting(db, 'free_points_daily')) ?? '50'
   );
 
+  const resetHours = Number(
+    (await getSetting(db, 'free_period_hours')) ?? 24
+  );
   const reset = new Date(
-    Date.now() + 24 * 3600 * 1000
+    Date.now() + Math.max(1, resetHours) * 3600 * 1000
   ).toISOString();
 
   const defaultModel = await getSetting(db, 'default_model_key');
@@ -518,6 +521,39 @@ export async function setSetting(
     .run();
 }
 
+export async function isPaymentProviderEnabled(
+  db: D1Database,
+  provider: string
+): Promise<boolean> {
+  const value = await getSetting(db, `payment_method_${provider}`);
+
+  // Backward compatibility for databases created before provider-level
+  // switches were introduced.
+  return value == null ? true : Number(value) === 1;
+}
+
+export async function isPaymentMethodEnabled(
+  db: D1Database,
+  provider: string
+): Promise<boolean> {
+  return (
+    Number((await getSetting(db, 'feature_payments')) ?? 0) === 1 &&
+    await isPaymentProviderEnabled(db, provider)
+  );
+}
+
+export async function setPaymentMethodEnabled(
+  db: D1Database,
+  provider: string,
+  enabled: boolean
+): Promise<void> {
+  await setSetting(
+    db,
+    `payment_method_${provider}`,
+    enabled ? '1' : '0'
+  );
+}
+
 export async function listSettings(
   db: D1Database
 ): Promise<Array<{ key: string; value: string }>> {
@@ -558,6 +594,341 @@ export async function listPlans(
           'SELECT * FROM plans WHERE is_active=1 ORDER BY kind,sort'
         )
       );
+}
+
+export async function getPlanPaymentPrice(
+  db: D1Database,
+  planKey: string,
+  provider: string
+): Promise<PlanPaymentPrice | null> {
+  return first<PlanPaymentPrice>(
+    db.prepare(
+      'SELECT * FROM plan_payment_prices WHERE plan_key=? AND provider=? AND is_active=1'
+    ).bind(planKey, provider)
+  );
+}
+
+export async function setPlanPaymentPrice(
+  db: D1Database,
+  planKey: string,
+  provider: string,
+  currency: string,
+  amount: number
+): Promise<void> {
+  await db.prepare(
+    `INSERT INTO plan_payment_prices(plan_key,provider,currency,amount,is_active,updated_at)
+     VALUES(?,?,?,?,1,?)
+     ON CONFLICT(plan_key,provider)
+     DO UPDATE SET currency=excluded.currency,amount=excluded.amount,is_active=1,updated_at=excluded.updated_at`
+  ).bind(planKey, provider, currency, amount, nowIso()).run();
+}
+
+export async function createProviderOrder(
+  db: D1Database,
+  userId: number,
+  plan: Plan,
+  provider: string,
+  amount: number,
+  currency: string,
+  paymentUrl: string | null = null
+): Promise<Order> {
+  const id = `ord_${crypto.randomUUID().replaceAll('-', '').slice(0, 20)}`;
+  const now = nowIso();
+  const expires = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+
+  await db.prepare(
+    `INSERT INTO orders(
+      id,user_id,plan_key,kind,title_ru,title_en,amount_minor,currency,status,
+      provider,provider_order_id,payment_url,created_at,expires_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    id,userId,plan.plan_key,plan.kind,plan.title_ru,plan.title_en,amount,currency,
+    'pending',provider,null,paymentUrl,now,expires
+  ).run();
+
+  return (await first<Order>(db.prepare('SELECT * FROM orders WHERE id=?').bind(id)))!;
+}
+
+export type StarsOrderResult = {
+  order: Order;
+  plan: Plan;
+  alreadyPaid: boolean;
+  expiresAt?: string;
+  points?: number;
+  days?: number;
+};
+
+export async function completeTelegramStarsOrder(
+  db: D1Database,
+  orderId: string,
+  userId: number,
+  amountStars: number,
+  chargeId: string
+): Promise<StarsOrderResult | null> {
+  const order = await first<Order>(
+    db.prepare('SELECT * FROM orders WHERE id=?').bind(orderId)
+  );
+  if (!order || order.user_id !== userId) return null;
+
+  const plan = await getPlan(db, order.plan_key);
+  if (!plan || plan.kind !== 'subscription' || !plan.duration_days) return null;
+
+  if (order.status === 'paid') {
+    const expires = await first<{expires_at:string}>(
+      db.prepare(
+        'SELECT expires_at FROM subscriptions WHERE order_id=? ORDER BY created_at DESC LIMIT 1'
+      ).bind(orderId)
+    );
+    return { order, plan, alreadyPaid:true, expiresAt:expires?.expires_at };
+  }
+
+  if (
+    order.status !== 'pending' ||
+    order.provider !== 'telegram_stars' ||
+    order.currency !== 'XTR' ||
+    Number(order.amount_minor) !== Number(amountStars) ||
+    !chargeId
+  ) return null;
+
+  const now = nowIso();
+  if (order.expires_at && new Date(order.expires_at).getTime() <= Date.now()) return null;
+
+  const existing = await first<{expires_at:string}>(
+    db.prepare(
+      'SELECT expires_at FROM subscriptions WHERE user_id=? AND expires_at>? ORDER BY expires_at DESC LIMIT 1'
+    ).bind(userId, now)
+  );
+  const start = existing ? new Date(existing.expires_at) : new Date(now);
+  const expiresAt = new Date(start.getTime() + plan.duration_days * 86400000).toISOString();
+  const dailyPoints = Number(plan.points) > 0
+    ? Number(plan.points)
+    : Number((await getSetting(db,'free_points_subscriber')) ?? 100);
+  const resetHours = Math.max(1, Number((await getSetting(db,'free_period_hours')) ?? 24));
+
+  const statements: D1PreparedStatement[] = [
+    db.prepare(
+      `UPDATE orders
+       SET status='paid',paid_at=?,provider='telegram_stars',provider_order_id=?
+       WHERE id=? AND status='pending' AND provider='telegram_stars' AND currency='XTR'`
+    ).bind(now, chargeId, orderId),
+
+    db.prepare(
+      `INSERT INTO payments(
+        id,order_id,provider,provider_payment_id,amount_minor,currency,status,created_at
+      )
+      SELECT ?,?,?,?,?,?,'paid',?
+      WHERE EXISTS(
+        SELECT 1 FROM orders
+        WHERE id=? AND status='paid' AND provider='telegram_stars' AND provider_order_id=?
+      )
+      ON CONFLICT(provider,provider_payment_id) DO NOTHING`
+    ).bind(
+      uuid(),orderId,'telegram_stars',chargeId,amountStars,'XTR',now,orderId,chargeId
+    ),
+
+    db.prepare(
+      `INSERT INTO subscriptions(
+        id,user_id,plan_key,starts_at,expires_at,source,order_id,created_at
+      )
+      SELECT ?,?,?,?,?,?,?,?
+      WHERE EXISTS(
+        SELECT 1 FROM payments
+        WHERE order_id=? AND provider='telegram_stars' AND provider_payment_id=? AND status='paid'
+      )
+      AND NOT EXISTS(
+        SELECT 1 FROM subscriptions WHERE order_id=?
+      )`
+    ).bind(
+      uuid(),userId,plan.plan_key,start.toISOString(),expiresAt,'telegram_stars',orderId,now,
+      orderId,chargeId,orderId
+    ),
+
+    db.prepare(
+      `UPDATE balances
+       SET free_points=?,free_reset_at=?,updated_at=?
+       WHERE user_id=?
+       AND EXISTS(
+         SELECT 1 FROM subscriptions WHERE order_id=?
+       )
+       AND NOT EXISTS(
+         SELECT 1 FROM transactions WHERE user_id=? AND ref=? AND kind='subscription_bonus'
+       )`
+    ).bind(
+      dailyPoints,new Date(Date.now()+resetHours*3600000).toISOString(),now,userId,
+      orderId,userId,orderId
+    ),
+
+    db.prepare(
+      `INSERT INTO transactions(
+        id,user_id,kind,free_amount,paid_amount,ref,created_at
+      )
+      SELECT ?,?, 'subscription_bonus',?,0,?,?
+      WHERE EXISTS(
+        SELECT 1 FROM subscriptions WHERE order_id=?
+      )
+      AND NOT EXISTS(
+        SELECT 1 FROM transactions WHERE user_id=? AND ref=? AND kind='subscription_bonus'
+      )`
+    ).bind(
+      uuid(),userId,dailyPoints,orderId,now,orderId,userId,orderId
+    )
+  ];
+
+  let batchResult:Array<{success?:boolean;meta?:{changes?:number}&Record<string,unknown>}>;
+  try {
+    batchResult=await db.batch(statements);
+  } catch (err) {
+    console.error('telegram_stars_complete_error', String(err));
+    throw new Error('STARS_DB_ACTIVATION_FAILED');
+  }
+
+  const paidOrder = await first<Order>(
+    db.prepare('SELECT * FROM orders WHERE id=?').bind(orderId)
+  );
+  if (!paidOrder) return null;
+
+  if (paidOrder.status === 'paid' && paidOrder.provider_order_id === chargeId) {
+    const payment = await first<{status:string}>(
+      db.prepare('SELECT status FROM payments WHERE order_id=? AND provider_payment_id=?').bind(orderId,chargeId)
+    );
+    const subscription = await first<{expires_at:string}>(
+      db.prepare('SELECT expires_at FROM subscriptions WHERE order_id=? ORDER BY created_at DESC LIMIT 1').bind(orderId)
+    );
+    if (payment?.status === 'paid' && subscription) {
+      return {
+        order: paidOrder,
+        plan,
+        alreadyPaid: Number(batchResult?.[1]?.meta?.changes??0) !== 1,
+        expiresAt: subscription.expires_at,
+        points: dailyPoints,
+        days: plan.duration_days
+      };
+    }
+  }
+
+  const existingPayment = await first<{status:string}>(
+    db.prepare('SELECT status FROM payments WHERE order_id=?').bind(orderId)
+  );
+  const existingSubscription = await first<{expires_at:string}>(
+    db.prepare('SELECT expires_at FROM subscriptions WHERE order_id=? ORDER BY created_at DESC LIMIT 1').bind(orderId)
+  );
+  if (paidOrder.status === 'paid' && existingPayment?.status === 'paid' && existingSubscription) {
+    return { order:paidOrder, plan, alreadyPaid:true, expiresAt:existingSubscription.expires_at };
+  }
+
+  return null;
+}
+
+export type RefundableStarsOrder = Order & {
+  payment_id: string;
+  payment_status: string;
+  provider_payment_id: string;
+  refunded_at: string | null;
+  refunded_by: number | null;
+  refund_error: string | null;
+  username: string | null;
+  first_name: string | null;
+};
+
+export async function getRefundableStarsOrder(db:D1Database,orderId:string):Promise<RefundableStarsOrder|null>{
+  return first<RefundableStarsOrder>(db.prepare(`
+    SELECT
+      o.*,
+      p.id AS payment_id,
+      p.status AS payment_status,
+      p.provider_payment_id,
+      p.refunded_at,
+      p.refunded_by,
+      p.refund_error,
+      u.username,
+      u.first_name
+    FROM orders o
+    JOIN payments p ON p.order_id=o.id AND p.provider='telegram_stars'
+    JOIN users u ON u.id=o.user_id
+    WHERE o.id=?
+    LIMIT 1
+  `).bind(orderId));
+}
+
+export async function listAdminStarsPayments(db:D1Database,limit=20):Promise<RefundableStarsOrder[]>{
+  const n=Math.max(1,Math.min(50,Math.floor(limit)));
+  return all<RefundableStarsOrder>(db.prepare(`
+    SELECT
+      o.*,
+      p.id AS payment_id,
+      p.status AS payment_status,
+      p.provider_payment_id,
+      p.refunded_at,
+      p.refunded_by,
+      p.refund_error,
+      u.username,
+      u.first_name
+    FROM orders o
+    JOIN payments p ON p.order_id=o.id AND p.provider='telegram_stars'
+    JOIN users u ON u.id=o.user_id
+    WHERE o.provider='telegram_stars'
+    ORDER BY o.created_at DESC
+    LIMIT ?
+  `).bind(n));
+}
+
+export async function beginStarsRefund(db:D1Database,orderId:string,adminId:number):Promise<boolean>{
+  const startedAt=nowIso();
+  const result=await db.prepare(`
+    UPDATE payments
+    SET status='refund_pending',refunded_by=?,refund_error=NULL,refund_started_at=?
+    WHERE order_id=? AND provider='telegram_stars' AND status='paid'
+  `).bind(adminId,startedAt,orderId).run();
+  return Number(result.meta?.changes??0)===1;
+}
+
+export async function failStarsRefund(db:D1Database,orderId:string,error:unknown):Promise<void>{
+  await db.prepare(`
+    UPDATE payments
+    SET status='paid',refund_error=?,refund_started_at=NULL
+    WHERE order_id=? AND provider='telegram_stars' AND status='refund_pending'
+  `).bind(String(error instanceof Error?error.message:error).slice(0,1000),orderId).run();
+}
+
+export async function finalizeStarsRefund(db:D1Database,orderId:string,adminId:number,revokeSubscription:boolean):Promise<boolean>{
+  const now=nowIso();
+  const statements:D1PreparedStatement[]=[
+    db.prepare(`
+      UPDATE payments
+      SET status='refunded',refunded_at=?,refunded_by=?,refund_error=NULL
+      WHERE order_id=? AND provider='telegram_stars' AND status='refund_pending'
+    `).bind(now,adminId,orderId),
+    db.prepare("UPDATE orders SET status='refunded' WHERE id=? AND status='paid'").bind(orderId),
+  ];
+
+  if(revokeSubscription){
+    const order=await first<{user_id:number}>(db.prepare('SELECT user_id FROM orders WHERE id=?').bind(orderId));
+    if(!order)return false;
+    const freeDaily=Math.max(0,Number((await getSetting(db,'free_points_daily'))??50));
+    const resetHours=Math.max(1,Number((await getSetting(db,'free_period_hours'))??24));
+    statements.push(
+      db.prepare("UPDATE subscriptions SET expires_at=? WHERE order_id=? AND expires_at>?").bind(now,orderId,now),
+      db.prepare(`
+        UPDATE balances
+        SET free_points=?,free_reset_at=?,updated_at=?
+        WHERE user_id=?
+        AND NOT EXISTS(
+          SELECT 1 FROM subscriptions
+          WHERE user_id=? AND expires_at>? AND order_id<>?
+        )
+      `).bind(freeDaily,new Date(Date.now()+resetHours*3600000).toISOString(),now,order.user_id,order.user_id,now,orderId)
+    );
+  }
+
+  try {
+    const result=await db.batch(statements);
+    const paymentChanged=Number(result[0]?.meta?.changes??0)===1;
+    const orderChanged=Number(result[1]?.meta?.changes??0)===1;
+    return paymentChanged && orderChanged;
+  } catch(err){
+    console.error('stars_refund_finalize_error',String(err));
+    return false;
+  }
 }
 
 export async function createOrder(
@@ -1490,7 +1861,7 @@ export async function grantSubscription(
       uuid(),
       userId,
       'manual',
-      now.toISOString(),
+      start.toISOString(),
       expires,
       source,
       null,
@@ -1639,6 +2010,7 @@ export async function markOrderPaid(
               'free_points_subscriber'
             )) ?? 100
           );
+    const resetHours = Math.max(1, Number((await getSetting(db,'free_period_hours')) ?? 24));
 
     statements.push(
       db
@@ -1678,7 +2050,7 @@ export async function markOrderPaid(
           dailyPoints,
           new Date(
             Date.now() +
-              24 *
+              resetHours *
                 3600 *
                 1000
           ).toISOString(),
@@ -1949,10 +2321,11 @@ export async function grantSubscriptionPlan(db:D1Database,userId:number,planKey:
   const start=existing?new Date(existing.expires_at):now;
   const expires=new Date(start.getTime()+plan.duration_days*86400000).toISOString();
   const daily=Number(plan.points)>0?Number(plan.points):Number((await getSetting(db,'free_points_subscriber'))??100);
+  const resetHours=Math.max(1,Number((await getSetting(db,'free_period_hours'))??24));
   const nowS=now.toISOString();
   await db.batch([
-    db.prepare('INSERT INTO subscriptions(id,user_id,plan_key,starts_at,expires_at,source,order_id,created_at) VALUES(?,?,?,?,?,?,?,?)').bind(uuid(),userId,planKey,nowS,expires,source,null,nowS),
-    db.prepare('UPDATE balances SET free_points=?,free_reset_at=?,updated_at=? WHERE user_id=?').bind(daily,new Date(Date.now()+86400000).toISOString(),nowS,userId),
+    db.prepare('INSERT INTO subscriptions(id,user_id,plan_key,starts_at,expires_at,source,order_id,created_at) VALUES(?,?,?,?,?,?,?,?)').bind(uuid(),userId,planKey,start.toISOString(),expires,source,null,nowS),
+    db.prepare('UPDATE balances SET free_points=?,free_reset_at=?,updated_at=? WHERE user_id=?').bind(daily,new Date(Date.now()+resetHours*3600000).toISOString(),nowS,userId),
     db.prepare('INSERT INTO transactions(id,user_id,kind,free_amount,paid_amount,ref,created_at) VALUES(?,?,?,?,?,?,?)').bind(uuid(),userId,'subscription_bonus',daily,0,planKey,nowS)
   ]);
   return {expiresAt:expires,days:plan.duration_days,points:daily};
