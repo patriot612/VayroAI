@@ -1347,14 +1347,10 @@ async function handleCallback(
   if (
     action === 'chat'
   ) {
-    if (
-      args[0] === 'open'
-    ) {
-      await chatScreenText(
-        api,
-        user,
-        env
-      );
+    if (args[0] === 'open') {
+      if(user.mode==='search') await leaveSearchMode(env.DB,user.id);
+      const fresh=await repo.getUser(env.DB,user.id);
+      if(fresh) await chatScreenText(api,fresh,env,sourceMessageId);
       return;
     }
 
@@ -1881,41 +1877,38 @@ async function handleCallback(
         return;
       }
 
-      await env.DB
-        .prepare(
-          'UPDATE users SET mode=?,search_model_key=? WHERE id=?'
-        )
-        .bind(
-          'search',
-          m.model_key,
-          user.id
-        )
-        .run();
+      const fresh=await repo.getUser(env.DB,user.id);
+      if(!fresh){await safeSend(api,user.id,t(user.language,'not_found'));return;}
+
+      // Capture the exact normal-chat state only on the first transition into Search Mode.
+      if(fresh.mode!=='search'){
+        const chat=fresh.current_chat_id
+          ? await repo.getChat(env.DB,fresh.current_chat_id,user.id)
+          : await repo.ensureChat(env.DB,fresh,env);
+        if(!chat){await safeSend(api,user.id,t(user.language,'no_models'));return;}
+        const chatModel=await repo.modelByKey(env.DB,chat.model_key);
+        let previousWebSearchState=0;
+        if(chatModel && isQwenModel(chatModel)){
+          const settings=await repo.ensureChatAiSettings(env.DB,user.id,chat.id,chatModel.model_key);
+          previousWebSearchState=Number(settings.web_search_enabled??0)?1:0;
+        }
+        await env.DB.prepare(
+          'UPDATE users SET mode=?,search_model_key=?,previous_chat_model_key=?,previous_chat_web_search_state=? WHERE id=?'
+        ).bind('search',m.model_key,chat.model_key,previousWebSearchState,user.id).run();
+      } else {
+        await env.DB.prepare('UPDATE users SET mode=?,search_model_key=? WHERE id=?').bind('search',m.model_key,user.id).run();
+      }
+
       await env.DB.prepare("DELETE FROM pending_actions WHERE user_id=? AND kind IN ('vision_prompt','chat_retry','rename_chat','custom_role')").bind(user.id).run();
 
-      const fresh=await repo.getUser(env.DB,user.id);if(fresh) await screens.searchScreen(api,env.DB,env,fresh,sourceMessageId);
+      const active=await repo.getUser(env.DB,user.id);if(active) await screens.searchScreen(api,env.DB,env,active,sourceMessageId);
       return;
     }
 
-    if (
-      args[0] === 'back'
-    ) {
-      await env.DB
-        .prepare(
-          'UPDATE users SET mode=?,search_model_key=NULL WHERE id=?'
-        )
-        .bind(
-          'chat',
-          user.id
-        )
-        .run();
-
-      await chatScreenText(
-        api,
-        user,
-        env
-      );
-
+    if (args[0] === 'back') {
+      await leaveSearchMode(env.DB,user.id);
+      const fresh=await repo.getUser(env.DB,user.id);
+      if(fresh) await chatScreenText(api,fresh,env,sourceMessageId);
       return;
     }
   }
@@ -2172,7 +2165,11 @@ async function handleChatMessage(
   ctx: ExecutionContext
 ) {
   if(user.mode!=='search' && Number((await repo.getSetting(env.DB,'feature_chat'))??1)===0 && !isAdmin(env,user.id)){await safeSend(new TelegramApi(env),user.id,t(user.language,'coming_soon'));return;}
-  if(user.mode==='search' && Number((await repo.getSetting(env.DB,'feature_search'))??1)===0){user.mode='chat';user.search_model_key=null;await env.DB.prepare("UPDATE users SET mode='chat',search_model_key=NULL WHERE id=?").bind(user.id).run();}
+  if(user.mode==='search' && Number((await repo.getSetting(env.DB,'feature_search'))??1)===0){
+    await leaveSearchMode(env.DB,user.id);
+    const restored=await repo.getUser(env.DB,user.id);
+    if(restored) user=restored;
+  }
   if (
     text.length >
     Number(
@@ -2239,15 +2236,16 @@ async function handleChatMessage(
       );
     }
 
-    const chat =
-      await repo.ensureChat(
-        env.DB,
-        fresh,
-        env
-      );
-
     isSearchMode =
       fresh.mode === 'search' && Boolean(fresh.search_model_key);
+
+    const chat = isSearchMode
+      ? (fresh.current_chat_id
+          ? await repo.getChat(env.DB,fresh.current_chat_id,user.id)
+          : await repo.ensureChat(env.DB,fresh,env))
+      : await repo.ensureChat(env.DB,fresh,env);
+
+    if(!chat) throw new Error('NO_MODEL');
 
     const model =
       fresh.mode === 'search' &&
@@ -2305,8 +2303,8 @@ async function handleChatMessage(
       await api.sendMessage(user.id,t(user.language,activeSub?'dialog_limit_subscriber':'dialog_limit_free',{limit:dialogLimit}),{parse_mode:'HTML',reply_markup:ik(buttons)});
       return;
     }
-    const qwenSettings=isQwenModel(model)?await repo.ensureChatAiSettings(env.DB,user.id,chat.id,model.model_key):null;
-    const externalWebSearch=usesExternalQwenWebSearch(model,fresh,qwenSettings);
+    const qwenSettings=!isSearchMode && isQwenModel(model)?await repo.ensureChatAiSettings(env.DB,user.id,chat.id,model.model_key):null;
+    const externalWebSearch=isSearchMode || usesExternalQwenWebSearch(model,fresh,qwenSettings);
     restoreSearchUi=async()=>{
       if(!isSearchMode)return;
       const searchUser=await repo.getUser(env.DB,user.id);
@@ -2332,6 +2330,7 @@ async function handleChatMessage(
       ? await searxngSearch(searchQuery,env,{
           language:fresh.language,
           maxResults:Math.max(1,Math.min(10,Number(repo.modelConfig(model).max_results??5))),
+          exactQuery:isSearchMode,
         })
       : [];
 
@@ -2346,8 +2345,9 @@ async function handleChatMessage(
       throw new Error('SEARCH_MODEL_UNAVAILABLE');
     }
 
-    const reservation=await repo.reservePoints(env.DB,user.id,model.cost,`ai:${fresh.mode}:${chat.id}:${uuid()}`);
+    const reservation=await repo.reservePoints(env.DB,user.id,model.cost,`${isSearchMode?'search':'ai'}:${chat.id}:${uuid()}`);
     if(!reservation.ok){
+      if(progressMessageId){try{await api.deleteMessage(user.id,progressMessageId)}catch{}}
       await safeSend(api,user.id,t(user.language,'insufficient',{cost:model.cost}));
       await restoreSearchUi();
       return;
@@ -2406,12 +2406,23 @@ async function handleChatMessage(
       );
 
     const controller=new AbortController();
-    const aiOptions=isQwenModel(model)?{
-      reasoning_effort:reasoningEffort(qwenSettings?.reasoning_mode??'deep'),
-      web_search:false,
-      web_search_count:5,
-      streaming:true
-    }:undefined;
+    const modelConfig=repo.modelConfig(model);
+    const aiOptions=isSearchMode
+      ? {
+          search_mode:true,
+          web_search:false,
+          web_search_count:0,
+          reasoning_effort:typeof modelConfig.reasoning_effort==='string' ? modelConfig.reasoning_effort : undefined,
+          streaming:false
+        }
+      : isQwenModel(model)
+        ? {
+            reasoning_effort:reasoningEffort(qwenSettings?.reasoning_mode??'deep'),
+            web_search:false,
+            web_search_count:5,
+            streaming:true
+          }
+        : undefined;
     let streamedText='';
     let lastStreamUpdate=0;
     const streamEnabled=Boolean(!isSearchMode&&isQwenModel(model)&&repo.modelConfig(model).streaming!==false);
@@ -2692,6 +2703,29 @@ async function withTimeout<T>(factory:()=>Promise<T>,ms:number,onTimeout?:()=>vo
   }finally{if(timer)clearTimeout(timer);}
 }
 
+async function leaveSearchMode(db:D1Database,userId:number):Promise<void>{
+  const current=await repo.getUser(db,userId);
+  if(!current || current.mode!=='search'){
+    return;
+  }
+
+  const previousModelKey=current.previous_chat_model_key;
+  const previousWebState=Number(current.previous_chat_web_search_state??0)?1:0;
+  const chat=current.current_chat_id?await repo.getChat(db,current.current_chat_id,userId):null;
+
+  if(chat && previousModelKey){
+    await repo.updateChatModel(db,chat.id,userId,previousModelKey);
+    const previousModel=await repo.modelByKey(db,previousModelKey);
+    if(previousModel && isQwenModel(previousModel)){
+      await repo.upsertChatAiSettings(db,userId,chat.id,previousModelKey,{web_search_enabled:previousWebState});
+    }
+  }
+
+  await db.prepare(
+    'UPDATE users SET mode=?,search_model_key=NULL,previous_chat_model_key=NULL,previous_chat_web_search_state=0 WHERE id=?'
+  ).bind('chat',userId).run();
+}
+
 async function currentChat(
   db: D1Database,
   user: any,
@@ -2759,6 +2793,10 @@ function reasoningLabel(lang:Lang,mode:string):string{
 }
 
 async function chatScreenText(api:TelegramApi,user:any,env:Env,sourceMessageId?:number){
+  const freshModeUser=await repo.getUser(env.DB,user.id);
+  if(freshModeUser?.mode==='search') await leaveSearchMode(env.DB,user.id);
+  const fresh=await repo.getUser(env.DB,user.id);
+  if(fresh) user=fresh;
   await env.DB.prepare('UPDATE users SET mode=?,search_model_key=NULL WHERE id=?').bind('chat',user.id).run();
   const chat=await currentChat(env.DB,user,env); const model=await repo.getUsableModel(env.DB,chat.model_key,env); const count=await repo.countLiveMessages(env.DB,chat.id,user.id);
   const role=chat.custom_role? '✏️': chat.role_key?`🎭 ${chat.role_key}`:'';
