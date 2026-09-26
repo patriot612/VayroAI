@@ -1,0 +1,38 @@
+import type { Env } from '../env';
+import type { TgMessage,TgUser,TgFile } from './types';
+export class TelegramApi{
+  constructor(private readonly env:Env){}
+  private get base(){return `https://api.telegram.org/bot${this.env.TELEGRAM_BOT_TOKEN}`}
+  private async call<T=unknown>(method:string,body:Record<string,unknown>,timeoutMs=15000):Promise<T>{
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),timeoutMs);
+    let res:Response;
+    try{
+      res=await fetch(`${this.base}/${method}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:controller.signal});
+    }finally{clearTimeout(timer);}
+    const raw=await res.text();
+    let json:{ok:boolean;result?:T;error_code?:number;description?:string}={ok:false};
+    try{json=raw?JSON.parse(raw):json;}catch{}
+    if(!res.ok)throw new Error(`TELEGRAM_HTTP_${res.status}:${String(json.description??raw).slice(0,500)}`);
+    if(!json.ok)throw new Error(`TELEGRAM_${json.error_code??'ERR'}:${String(json.description??'').slice(0,500)}`);
+    return json.result as T;
+  }
+  async sendMessage(chatId:number|string,text:string,opts:Record<string,unknown>={}){return this.call<TgMessage>('sendMessage',{chat_id:chatId,text,...opts})}
+  async editMessageText(chatId:number|string,messageId:number,text:string,opts:Record<string,unknown>={}){return this.call<TgMessage>('editMessageText',{chat_id:chatId,message_id:messageId,text,...opts})}
+  async editMessageReplyMarkup(chatId:number|string,messageId:number,replyMarkup:unknown){return this.call<TgMessage>('editMessageReplyMarkup',{chat_id:chatId,message_id:messageId,reply_markup:replyMarkup})}
+  async deleteMessage(chatId:number|string,messageId:number){return this.call<boolean>('deleteMessage',{chat_id:chatId,message_id:messageId})}
+  async answerCallback(callbackId:string,text?:string,showAlert=false){return this.call<boolean>('answerCallbackQuery',{callback_query_id:callbackId,text,show_alert:showAlert})}
+  async sendPhoto(chatId:number|string,fileId:string,caption?:string,opts:Record<string,unknown>={}){return this.call<TgMessage>('sendPhoto',{chat_id:chatId,photo:fileId,caption,...opts})}
+  async sendInvoice(chatId:number|string,title:string,description:string,payload:string,amountStars:number,opts:Record<string,unknown>={}){return this.call<TgMessage>('sendInvoice',{chat_id:chatId,title,description,payload,currency:'XTR',prices:[{label:title,amount:amountStars}],...opts})}
+  async answerPreCheckoutQuery(queryId:string,ok:boolean,errorMessage?:string){return this.call<boolean>('answerPreCheckoutQuery',{pre_checkout_query_id:queryId,ok,...(ok?{}:{error_message:errorMessage??'Payment could not be verified. Try again.'})})}
+  async refundStarPayment(userId:number,telegramPaymentChargeId:string){return this.call<boolean>('refundStarPayment',{user_id:userId,telegram_payment_charge_id:telegramPaymentChargeId})}
+  async sendPhotoBytes(chatId:number|string,bytes:ArrayBuffer|Uint8Array,filename:string,caption?:string,opts:Record<string,unknown>={},mime='image/png'){const fd=new FormData();fd.append('chat_id',String(chatId));fd.append('photo',new Blob([bytes],{type:mime}),filename);if(caption)fd.append('caption',caption);if(opts.parse_mode)fd.append('parse_mode',String(opts.parse_mode));if(opts.reply_markup)fd.append('reply_markup',JSON.stringify(opts.reply_markup));const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),30000);let res:Response;try{res=await fetch(`${this.base}/sendPhoto`,{method:'POST',body:fd,signal:controller.signal});}finally{clearTimeout(timer);}const raw=await res.text();let json:{ok:boolean;result?:TgMessage;error_code?:number;description?:string}={ok:false};try{json=raw?JSON.parse(raw):json;}catch{}if(!res.ok)throw new Error(`TELEGRAM_HTTP_${res.status}:${String(json.description??raw).slice(0,500)}`);if(!json.ok)throw new Error(`TELEGRAM_${json.error_code??'ERR'}:${String(json.description??'').slice(0,500)}`);return json.result as TgMessage}
+  async copyMessage(targetChatId:number,fromChatId:number,messageId:number,opts:Record<string,unknown>={}){return this.call<{message_id:number}>('copyMessage',{chat_id:targetChatId,from_chat_id:fromChatId,message_id:messageId,...opts})}
+  async getFile(fileId:string){return this.call<TgFile>('getFile',{file_id:fileId})}
+  async getFileBytes(fileId:string){const f=await this.getFile(fileId);if(!f.file_path)throw new Error('TELEGRAM_FILE_NOT_FOUND');const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),30000);let res:Response;try{res=await fetch(`https://api.telegram.org/file/bot${this.env.TELEGRAM_BOT_TOKEN}/${f.file_path}`,{signal:controller.signal});}finally{clearTimeout(timer);}if(!res.ok)throw new Error(`TELEGRAM_FILE_HTTP_${res.status}`);return await res.arrayBuffer()}
+  async setMyCommands(commands:Array<{command:string;description:string}>){return this.call<boolean>('setMyCommands',{commands})}
+  async setWebhook(url:string,secretToken:string){return this.call<boolean>('setWebhook',{url,secret_token:secretToken,allowed_updates:['message','callback_query','pre_checkout_query'],drop_pending_updates:false})}
+  async getMe(){return this.call<TgUser>('getMe',{})}
+}
+export function isBotBlockedError(err:unknown){return /blocked by the user|user is deactivated|chat not found/i.test(String(err))}
+export function telegramUserBlockedError(err:unknown){return isBotBlockedError(err)}
